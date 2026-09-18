@@ -3,7 +3,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-API%20v0.1-brightgreen)](https://earthengine.google.com/)
-[![Pakistan Focus](https://img.shields.io/badge/Focus-Pakistan%20Climate%20%26%20GIS-darkgreen)](https://github.com/mirzamuzzamil)
+[![Pakistan Focus](https://img.shields.io/badge/Focus-Pakistan%20Climate%20%26%20GIS-darkgreen)](https://github.com/mirzamuzzamilbaig/PakGeoStudio)
 [![Status: Production](https://img.shields.io/badge/Status-Production%20Ready-emerald)](#)
 
 ---
@@ -121,4 +121,4 @@ Developed with dedication for the **Pakistan & Global GIS Community** by:
 **Mirza Muhammad Muzzamil**  
 NED University of Engineering and Technology, Karachi, Pakistan  
 Email: `mirzamuzzamil@neduet.edu.pk`  
-GitHub: [@mirzamuzzamil](https://github.com/mirzamuzzamil)
+GitHub: [@mirzamuzzamilbaig](https://github.com/mirzamuzzamilbaig)
