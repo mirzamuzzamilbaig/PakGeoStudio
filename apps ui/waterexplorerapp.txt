@@ -1,0 +1,607 @@
+// An example interactive app that displays statistics aggregated per region.
+
+// We're using our own Map so we don't have geometry controls; layer panel, etc.
+var map = ui.Map();
+
+var hy3 = ee.FeatureCollection("users/gorelick/hybas/level3");
+var hy4 = ee.FeatureCollection("users/gorelick/hybas/level4");
+var hy5 = ee.FeatureCollection("users/gorelick/hybas/level5");
+var hy6 = ee.FeatureCollection("users/gorelick/hybas/level6");
+var stats = ee.FeatureCollection("projects/JRC/GSW2/trends/gaul2_trends_2018");
+var hystats = ee.FeatureCollection("projects/JRC/GSW2/trends/hy6_trends_2018");
+
+var transitionsClasses = {
+  "Permanent": "#0000ff",
+  "New Permanent": "#22b14c",
+  "Lost Permanent": "#d1102d",
+  "Seasonal": "#99d9ea",
+  "New Seasonal": "#b5e61d",
+  "Lost Seasonal": "#e6a1aa",
+  "Seasonal to Permanent": "#ff7f27",
+  "Permanent to Seasonal": "#ffc90e",
+  "Ephemeral Permanent": "#7f7f7f",
+  "Ephemeral Seasonal": "#c3c3c3"
+};
+
+// Constants used to visualize the regions on the map.
+var COUNTRIES_STYLE = {width: 1, color:'00000066', fillColor:'00000000'};
+var HIGHLIGHT_STYLE = {width: 1, color: '00000000', fillColor: '33ff0066'};
+
+// Points the user has clicked on, as [lon,lat] tuples.
+var selectedPoint = 0;
+var goodSelectedPoint = 0;
+
+// Definitions for each of the possible regions.
+var REGIONS = {
+  gaul0: {
+    label: 'FAO GAUL Level 0',
+    layer: ee.FeatureCollection("FAO/GAUL/2015/level0"),
+    lines: ee.FeatureCollection("users/gorelick/gaul/gaul0_lines80k"),
+    linesSimp: ee.FeatureCollection("users/gorelick/gaul/gaul0_lines80k_4k_drop"),
+    getPoly: function(pt) {
+      // Some gaul polygons are split.  Get all the ones with the same code.
+      var first = REGIONS.gaul0.layer.filterBounds(pt).first();
+      return REGIONS.gaul0.layer.filter(
+          ee.Filter.eq('ADM0_CODE', first.get('ADM0_CODE')));
+    }
+  },
+
+  gaul1: {
+    label: 'FAO GAUL Level 1',
+    layer: ee.FeatureCollection("FAO/GAUL/2015/level1"),
+    lines: ee.FeatureCollection("users/gorelick/gaul/gaul1_lines80k"),
+    linesSimp: ee.FeatureCollection("users/gorelick/gaul/gaul1_lines80k_4k_drop"),
+    getPoly: function(pt) {
+      // Some gaul polygons are split.
+      var first = REGIONS.gaul1.layer.filterBounds(pt).first()
+      return REGIONS.gaul1.layer
+        .filter(ee.Filter.eq('ADM0_CODE', first.get('ADM0_CODE')))
+        .filter(ee.Filter.eq('ADM1_CODE', first.get('ADM1_CODE')));
+    }
+  },
+
+  gaul2: {
+    label: 'FAO GAUL Level 2',
+    layer: ee.FeatureCollection("FAO/GAUL/2015/level2"),
+    getPoly: function(pt) {
+      // Some gaul polygons are split.
+      var first = REGIONS.gaul2.layer.filterBounds(pt).first()
+
+      // I think ADM2 codes are unique, but this is just in case.
+      return REGIONS.gaul2.layer
+        .filter(ee.Filter.eq('ADM0_CODE', first.get('ADM0_CODE')))
+        .filter(ee.Filter.eq('ADM1_CODE', first.get('ADM1_CODE')))
+        .filter(ee.Filter.eq('ADM2_CODE', first.get('ADM2_CODE')));
+    }
+  },
+
+  hy3: {
+    label: 'WWF HydroBASINS level 3',
+    layer: hy3,
+    getPoly: function(pt) {
+      var filtered = hy3.filterBounds(pt);
+      var id = filtered.first().get("PFAF_ID");
+      return hy3.filter(ee.Filter.eq("PFAF_ID", id));
+    }
+  },
+
+  hy4: {
+    label: 'WWF HydroBASINS level 4',
+    layer: hy4,
+    getPoly: function(pt) {
+      var filtered = hy4.filterBounds(pt);
+      var id = filtered.first().get("PFAF_ID");
+      return hy4.filter(ee.Filter.eq("PFAF_ID", id));
+    }
+  },
+
+  hy5: {
+    label: 'WWF HydroBASINS level 5',
+    layer: hy5,
+    getPoly: function(pt) {
+      var filtered = hy5.filterBounds(pt);
+      var id = filtered.first().get("PFAF_ID");
+      return hy5.filter(ee.Filter.eq("PFAF_ID", id));
+    }
+  },
+
+  hy6: {
+    label: 'WWF HydroBASINS level 6',
+    layer: hy6,
+    getPoly: function(pt) {
+      var filtered = hy6.filterBounds(pt);
+      var id = filtered.first().get("PFAF_ID");
+      return hy6.filter(ee.Filter.eq("PFAF_ID", id));
+    }
+  }
+};
+
+var CURRENT_REGION = REGIONS['gaul0']
+
+// Get the yearly data in the form of a list of features.
+var chartData = function(pt) {
+    var regions = CURRENT_REGION.layer;
+    var name, filtered, path = '', code, feature;
+    if (CURRENT_REGION == REGIONS.gaul0) {
+      feature = ee.Feature(regions.filterBounds(pt).first());
+      name = feature.get('ADM0_NAME');
+      code = ee.Number(feature.get('ADM0_CODE'));
+      filtered = stats.filter(ee.Filter.eq("ADM0_CODE", code));
+      path = code.format('gaul0-%d-2018.csv');
+    } else if (CURRENT_REGION == REGIONS.gaul1) {
+      feature = ee.Feature(regions.filterBounds(pt).first());
+      name = ee.String(feature.get('ADM1_NAME'))
+          .cat(", ")
+          .cat(feature.get('ADM0_NAME'));
+      code = ee.Number(feature.get('ADM1_CODE'));
+      filtered = stats.filter(ee.Filter.eq("ADM1_CODE", code));
+      path = code.format('gaul1-%d-2018.csv');
+    } else if (CURRENT_REGION == REGIONS.gaul2) {
+      feature = ee.Feature(regions.filterBounds(pt).first());
+      name = ee.String(feature.get('ADM2_NAME'))
+          .cat(", ").cat(feature.get('ADM1_NAME'))
+          .cat(", ").cat(feature.get('ADM0_NAME'));
+      code = ee.Number(feature.get('ADM2_CODE'));
+      filtered = stats.filter(ee.Filter.eq("ADM2_CODE", code));
+      path = code.format('gaul2-%d-2018.csv');
+    } else if (CURRENT_REGION == REGIONS.hy3) {
+      feature = ee.Feature(hy3.filterBounds(pt).first());
+      var code = ee.Number(feature.get("PFAF_ID"));
+      name = code.format("Basin %d");
+      var lower = code.multiply(1000);
+      var upper = lower.add(999);
+      filtered = hystats.filter(ee.Filter.rangeContains("PFAF_ID", lower, upper));
+      path = code.format('hydrobasins3-%d-2018.csv');
+    } else if (CURRENT_REGION == REGIONS.hy4) {
+      feature = ee.Feature(hy4.filterBounds(pt).first());
+      code = ee.Number(feature.get("PFAF_ID"));
+      var lower = code.multiply(100);
+      var upper = lower.add(99);
+      filtered = hystats.filter(ee.Filter.rangeContains("PFAF_ID", lower, upper));
+      name = code.format("Basin %d");
+      path = code.format('hydrobasins4-%d-2018.csv');
+    } else if (CURRENT_REGION == REGIONS.hy5) {
+      feature = ee.Feature(hy5.filterBounds(pt).first());
+      code = ee.Number(feature.get("PFAF_ID"));
+      var lower = code.multiply(10);
+      var upper = lower.add(9);
+      filtered = hystats.filter(ee.Filter.rangeContains("PFAF_ID", lower, upper));
+      name = code.format("Basin %d");
+      path = code.format('hydrobasins5-%d-2018.csv');
+    } else if (CURRENT_REGION == REGIONS.hy6) {
+      feature = ee.Feature(hy6.filterBounds(pt).first());
+      code = ee.Number(feature.get("PFAF_ID"));
+      filtered = hystats.filter(ee.Filter.eq('PFAF_ID', code));
+      name = code.format("Basin %d");
+      path = code.format('hydrobasins6-%d-2018.csv');
+    } else {
+      return
+    }
+
+    var columns =
+        ["year", "maybePermanent", "maybeSeasonal", "permanent", "seasonal"];
+    var reducer = ee.Reducer.sum().repeat(4).group(0)
+    var sums = ee.List(filtered.reduceColumns(reducer, columns).get('groups'))
+        .map(function(dict) {
+           dict = ee.Dictionary(dict);
+           var sum = ee.List(dict.get('sum'));
+           var mp = ee.Number(sum.get(0));
+           var ms = ee.Number(sum.get(1));
+           var p = ee.Number(sum.get(2));
+           var s = ee.Number(sum.get(3));
+           return ee.Feature(null, {
+             year: dict.get('group'),
+             region: name,
+             path: path,
+             permanent: p,
+             seasonal: s,
+             predictedPermanent: mp,
+             predictedSeasonal: ms,
+             summedPermanent: p.add(mp),
+             summedSeasonal: s.add(ms)
+           });
+        });
+    return sums;
+}
+
+// Adds new columns to rows, computing a moving average of the given
+// column indexes, averaging over the given number of rows before and after.
+// If columns is given, returns only the given column indexes.
+// If skipBelow90 is set, low-confidence points are excluded from the moving
+// average curve.
+var addMovingAverage = function(rows, indexes, columns, skipBelow90) {
+  var before = 4, after = 0;  // Trailing average
+  var totals = {}, counts = {}, j, newRows = [];
+  indexes.forEach(function(index) { totals[index] = counts[index] = 0; });
+  var filterColumns = function(x, i) {
+    return columns ? (columns.indexOf(i) !== -1) : true;
+  };
+  for (var i = 0; i < rows.length + after; i++) {
+    if (i < rows.length) {
+      for (j = 0; j < indexes.length; j++) {
+        totals[indexes[j]] += rows[i].c[indexes[j]].v;
+        counts[indexes[j]] ++;
+      }
+    }
+    if (i >= after) {
+      var cols = rows[i - after].c.filter(filterColumns);
+      for (j = 0; j < indexes.length; j++) {
+        var val = {v: totals[indexes[j]] / counts[indexes[j]] };
+        if (skipBelow90) {
+          var c = rows[i-after].c;
+          // Assume that the subsequent column is the "confident" value.
+          if (c[indexes[j] + 1].v / c[indexes[j]].v < 0.9) {
+            val = {v: null};
+            // Don't plot isolated points: set to null if there's a null
+            // before and after.
+            if (i - after === 1 ||
+                (i - after > 1 && newRows[i - after - 2].c[cols.length].v === null)) {
+              newRows[i - before - 1].c[cols.length].v = null;
+            }
+          }
+        }
+        cols.push(val);
+      }
+      newRows.push({c: cols});
+    }
+    if (i >= before+after) {
+      for (j = 0; j < indexes.length; j++) {
+        totals[indexes[j]] -= rows[i - before - after].c[indexes[j]].v;
+        counts[indexes[j]] --;
+      }
+    }
+  }
+  return newRows;
+}
+
+// Converts feature list into GViz table of the form [{c: [{v: ..}, ...]}, ...].
+var asGvizTable = function(features, columns) {
+  return features.map(function(f) {
+    f = ee.Feature(f);
+    return {c: columns.map(function(col) { return {v: f.get(col)}; })};
+  })
+}
+
+// Convert the list of features into a chart.
+var handleChart = function(pt, chartRenderer) {
+  var data = chartData(pt)
+  if (!data) {
+    return
+  }
+  var rows = asGvizTable(data, ['year',
+      'summedPermanent', 'permanent', 'predictedPermanent',
+      'summedSeasonal', 'seasonal', 'predictedSeasonal']);
+  var evaluand = ee.Dictionary({
+    rows: rows,
+    name: ee.Feature(data.get(0)).get('region'),
+    path: ee.Feature(data.get(0)).get('path')
+  });
+  evaluand.evaluate(function(evaluated) {
+    if (!evaluated) {
+      chartRenderer();
+      return;
+    }
+    var dataTable = {
+      cols: [{id: 'year', label: 'Year', type: 'string'},
+             {id: 'permanent', label: 'Permanent', type: 'number'},
+             {id: 'predictedPermanent', label: 'Projected', type: 'number'},
+             // {id: 'permanent_ma', label: '5yr ma', type: 'number'},
+             ],
+      rows: addMovingAverage(evaluated['rows'], [1], [0,2,3]),
+    }
+    var after2000 = evaluated['rows'].filter(function(row) {
+        return row.c[0].v >= 2000
+    });
+    var dataTable2 = {
+      cols: [{id: 'year', label: 'Year', type: 'string'},
+             {id: 'seasonal', label: 'Seasonal', type: 'number'},
+             {id: 'predictedSeasonal', label: 'Projected', type: 'number'},
+             ],
+      rows: addMovingAverage(after2000, [], [0,5,6], true),
+    }
+
+    var bars = function(color) { return {type: 'bars', color: color} };
+    var line = function(color) {
+      return {
+          type: 'line',
+          visibleInLegend: true,
+          color: color,
+          lineWidth: 3,
+          curveType: 'function'
+      };
+    }
+    var whiteBox = {
+      style:'boxes', lineWidth:0, boxWidth:1, color:'white', fillOpacity:0.6
+    };
+    var options = function(prefix, color, lightColor, lineColor, width) {
+      return {
+        title: prefix + ' Water Surface Area - ' + evaluated['name'],
+        vAxis: {title: 'Area (km²)', minValue: 0},
+        hAxis: {title: 'Year', slantedText: false, maxAlternation: 1},
+        series: [bars(color), bars(lightColor), line(lineColor)],
+        interval: { 'i0': whiteBox, 'i1': whiteBox },
+        bar: {groupWidth: '50%'},
+        chartArea: {width:  '76%', left: (width === 200 ? '25%' : '20%')},
+        width: width,
+        legend: {position: 'top'},
+        isStacked: true,
+        focusTarget: 'category',
+      };
+    };
+    var chart = ui.Chart(dataTable,
+        "ComboChart",
+         options('Annual', '#260099', '#d9ccff', '#0000ff', 300));
+    var chart2 = ui.Chart(dataTable2,
+        "ComboChart",
+        options('(Experimental) Seasonal', '#007399', '#99e6ff','#00bfff', 200));
+    chartRenderer(evaluated['path'], chart, chart2);
+  })
+}
+
+// Convert the list of features into a table.
+function makeResultsTable(point, chartRenderer) {
+  var data = chartData(point);
+  var rowTable = asGvizTable(data, ['year', 'region',
+       'summedPermanent','summedSeasonal',
+       'permanent', 'seasonal', 'predictedPermanent','predictedSeasonal']);
+  var evaluand = ee.Dictionary({
+    rows: rowTable,
+    path: ee.Feature(data.get(0)).get('path')
+  });
+  evaluand.evaluate(function(evaluated) {
+    if (!evaluated) {
+      chartRenderer();
+      return;
+    }
+    var dataTable = {
+      cols: [{id: 'year', label: 'Year', type: 'string'},
+             {id: 'region', label: 'Region', type: 'string'},
+             {id: 'summedPermanent', label: 'summedPermanent', type: 'number'},
+             {id: 'summedSeasonal',  label: 'summedSeasonal', type: 'number'},
+             {id: 'permanent', label: 'Permanent', type: 'number'},
+             {id: 'seasonal', label: 'Seasonal', type: 'number'},
+             {id: 'predictedPermanent', label: 'predictedPermanent',   type: 'number'},
+             {id: 'predictedSeasonal', label: 'predictedSeasonal',   type: 'number'},
+             {id: '5yrPermanent', label: '5yrPermanent', type: 'number'},
+             {id: '5yrSeasonal', label: '5yrSeasonal', type: 'number'},
+             ],
+      rows: addMovingAverage(evaluated['rows'], [2, 3]),
+    };
+    var table = ui.Chart(dataTable, "Table", {
+      height: '350',
+      width: '450',
+      pageSize: 32,
+      allowHtml: true
+    });
+    chartRenderer(evaluated['path'], table);
+  });
+}
+
+// Updates the map overlay using the currently-selected countries.
+function updateOverlay() {
+  var poly = CURRENT_REGION.getPoly(selectedPoint);
+  var overlay = poly.style(HIGHLIGHT_STYLE);
+  map.layers().set(2, ui.Map.Layer(overlay));
+}
+
+// Updates the chart using the currently-selected charting function,
+function updateChart() {
+  var chartBuilder = chartTypeToggleButton.value;
+  var lastWidget = resultsPanel.widgets().length() - 1;
+  var oldButtons = resultsPanel.widgets().get(lastWidget);
+  resultsPanel.widgets().set(lastWidget,
+      ui.Label('... loading data ...', {padding: '0 180px', height: '29px'}));
+  var chart = chartBuilder(selectedPoint, function(path, chart, chart2) {
+    if (chart) {
+      resultsPanel.clear();
+      if (chart2) {
+        var horiz = ui.Panel.Layout.Flow('horizontal');
+        resultsPanel.add(ui.Panel([chart, chart2], horiz));
+      } else {
+        resultsPanel.add(chart);
+      }
+      resultsPanel.add(buttonPanel);
+      csvLink.setUrl(
+        'https://storage.cloud.google.com/global-surface-water-stats/' + path);
+      csvLink.style().set('shown', path !== '');
+      goodSelectedPoint = selectedPoint;
+    } else {
+      // Failed point lookup: reset to previous region, if any.
+      resultsPanel.widgets().set(lastWidget, oldButtons);
+      selectedPoint = goodSelectedPoint;
+    }
+    // Only update the overlay once the chart has succeeded or failed.
+    if (selectedPoint) {
+        updateOverlay();
+    }
+  });
+}
+
+// Clears the set of selected points and resets the overlay and results
+// panel to their default state.
+function clearResults() {
+  selectedPoint = 0;
+  goodSelectedPoint = 0;
+  map.layers().remove(map.layers().get(2));
+  var instructionsLabel = ui.Label('Select region to extract data.');
+  resultsPanel.widgets().reset([instructionsLabel]);
+}
+
+// Register a click handler for the map that adds the clicked point to the
+// list and updates the map overlay and chart accordingly.
+function handleMapClick(location) {
+  selectedPoint = ee.Geometry.Point([location.lon, location.lat])
+  updateChart();
+}
+map.onClick(handleMapClick);
+
+// A button widget that toggles (or cycles) between states.
+// To construct a ToggleButton, supply an array of objects describing
+// the desired states, each with 'label' and 'value' properties.
+
+function ToggleButton(states, onClick, style) {
+  var index = 0;
+  var button = ui.Button({
+    label: states[index].label,
+    style: style
+  });
+  button.value = states[index].value;
+  button.onClick(function() {
+    index = ++index % states.length;
+    button.setLabel(states[index].label);
+    button.value = states[index].value;
+    // Call the onClick function with the new value.
+    onClick(states[index].value);
+  });
+  return button;
+}
+
+// Our chart type toggle button: the button text is the opposite of the
+// current state, since you click the button to switch states.
+var chartTypeToggleButton = ToggleButton([{
+    label: 'Display results as table',
+    value: handleChart,
+  }, {
+    label: 'Display results as chart',
+    value: makeResultsTable,
+  }], updateChart);
+
+var csvLink = ui.Label('Download CSV',
+  {height: '29px', fontSize:'11px', fontWeight: 700,
+   backgroundColor: '#f5f5f5', padding: '0 8px', border: '1px solid #0000001a'},
+   '#');
+
+// A panel containing the two buttons.
+var buttonPanel = ui.Panel(
+  [ui.Button('Clear results', clearResults), chartTypeToggleButton, csvLink],
+  ui.Panel.Layout.Flow('horizontal'),
+  {margin: '0 0 0 auto', width: '500px'});
+
+var resultsPanel = ui.Panel({style: {position:'bottom-right'}});
+map.add(resultsPanel);
+clearResults();
+
+///////////////////////////////////////////////////////////////////////////////
+// Create a legend for the basemap.
+///////////////////////////////////////////////////////////////////////////////
+var makeLegend = function() {
+  var makeRow = function(name, color) {
+    var colorBox = ui.Label("", {
+        backgroundColor: color,
+        padding: '8px',
+        margin: '0 0 4px 0'
+    });
+    var description = ui.Label(name, {margin: '0 0 4px 6px'});
+    return ui.Panel([colorBox, description], ui.Panel.Layout.Flow('horizontal'));
+  }
+  var legendPanel = ui.Panel({style: {margin: "0 0 4px 15px"}})
+  for (var name in transitionsClasses) {
+    legendPanel.add(makeRow(name, transitionsClasses[name]))
+  }
+
+  return ui.Panel([
+    ui.Label("Transitions 2000 - 2018", TITLE_STYLE),
+    legendPanel,
+    ui.Label('Source: Global Surface Water Layer (JRC)', FOOTNOTE_STYLE)
+  ], ui.Panel.Layout.flow('vertical'))
+}
+
+// Styling for the legend title.
+var TITLE_STYLE = {
+  fontSize: '16px',
+  fontWeight: 'bold',
+  stretch: 'horizontal',
+  textAlign: 'center',
+  margin: '4px 0 8px',
+};
+
+// Styling for the legend footnotes.
+var FOOTNOTE_STYLE = {
+  fontSize: '10px',
+  stretch: 'horizontal',
+  textAlign: 'center',
+  margin: '0 0 3px',
+};
+
+
+var getRegion = function() {
+  var value = regionsSelect.getValue();
+  for (var item in REGIONS) {
+    if (REGIONS[item].label == value) {
+      return REGIONS[item];
+    }
+  }
+}
+
+var resetRegionMap = function(zoom) {
+  clearResults();
+  if (regionsSelect.getValue()) {
+    CURRENT_REGION = getRegion();
+    if (!CURRENT_REGION) return;
+    var m;
+    if (zoom <= 7) {
+      m = CURRENT_REGION['linesSimp']
+    }
+    if (!m) {
+      m = CURRENT_REGION['lines']
+    }
+    if (!m) {
+      m = CURRENT_REGION.layer;
+    }
+    map.layers().set(1, m.style(COUNTRIES_STYLE))
+  }
+}
+
+// Add a regions selector
+var regions = Object.keys(REGIONS).map(function(key) {
+    return REGIONS[key].label
+})
+var regionsSelect = ui.Select({
+  items: regions,
+  value: regions[0],
+  onChange: function() { resetRegionMap(map.getZoom()) },
+  style: {'width': '194px', margin: '0 10px 10px 10px', backgroundColor: 'white'}
+})
+
+var regionsPanel = ui.Panel({
+  widgets: [ui.Label("Boundary Lines", TITLE_STYLE), regionsSelect],
+  style: {margin: "0 0 10px"}
+});
+
+var leftPanel = ui.Panel({
+  widgets: [regionsPanel, makeLegend()],
+  layout: ui.Panel.Layout.flow('vertical'),
+  style: {backgroundColor: '#00000030', width: '230px', position: 'bottom-left'}
+});
+
+map.add(leftPanel);
+
+// Set the map style to a monochrome silver.
+var OFF = [{"visibility": "off"}];
+var styledMapType = {
+  Grey: [
+    {stylers: [{ saturation: -80 }]},
+    { featureType: 'road', elementType: 'geometry',
+      stylers: [{ lightness: 100 },{ visibility: 'simplified' }]},
+    { featureType: 'road', elementType: 'labels', stylers: OFF},
+    { featureType: 'water', stylers: OFF},
+    { featureType: "administrative", elementType: "geometry", stylers: OFF}
+  ]
+};
+map.setOptions("Grey", styledMapType);
+
+// Set the basemap layer and finish the map widget configuration.
+var baseLayer = ui.Map.CloudStorageLayer({
+  bucket: "global-surface-water-stats",
+  path: "transitions/tiles",
+  maxZoom: 11,
+  suffix: ".png",
+  opacity: 0.8
+});
+map.layers().set(0, baseLayer);
+
+map.onChangeZoom(resetRegionMap);
+map.setControlVisibility({all: false, zoomControl: true});
+map.style().set('cursor', 'crosshair');
+ui.root.widgets().reset([map]);
+map.setCenter(0, 20, 3);

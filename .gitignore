@@ -1,0 +1,8 @@
+# Archives
+*.zip
+*.tar.gz
+
+# Scratch / temporary files
+*.tmp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,3 @@
+for running code apps
+
+geeadd app2script --url "https://ivannalissaputra24.users.earthengine.app/view/rasterdownloder"

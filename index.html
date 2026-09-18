@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PakGeoStudio — Pakistan Earth Observation & Climate Resilience Platform</title>
+  <meta name="description" content="Synthesizing 37 Google Earth Engine applications into a unified, state-of-the-art geospatial platform for Pakistan and the global GIS community.">
+  
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+  
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Top Navigation Bar -->
+  <header class="navbar">
+    <div class="nav-brand">
+      <div class="flag-icon">🇵🇰</div>
+      <div class="brand-text">
+        <h1>PakGeoStudio <span class="badge-accent">v2.0 PRO</span></h1>
+        <p class="brand-subtitle">Pakistan Earth Observation & Climate Platform • 37 GEE Apps Consolidated</p>
+      </div>
+    </div>
+
+    <div class="nav-badges">
+      <div class="stat-pill"><i class="fa-solid fa-layer-group"></i> <span>37 Apps Unified</span></div>
+      <div class="stat-pill"><i class="fa-solid fa-globe-asia"></i> <span>Pakistan Focus</span></div>
+      <div class="stat-pill live-pill"><i class="fa-solid fa-circle"></i> <span>GEE Ready</span></div>
+    </div>
+
+    <div class="nav-actions">
+      <button id="btn-swipe-mode" class="nav-btn" title="Toggle Split Swipe Comparison">
+        <i class="fa-solid fa-arrows-split-up-and-left"></i> <span>Swipe Mode</span>
+      </button>
+      <button id="btn-gee-modal" class="nav-btn btn-primary" title="View Earth Engine Code">
+        <i class="fa-brands fa-google"></i> <span>GEE Script Studio</span>
+      </button>
+      <a href="https://github.com/mirzamuzzamil" target="_blank" rel="noopener" class="nav-btn btn-github">
+        <i class="fa-brands fa-github"></i> <span>GitHub</span>
+      </a>
+    </div>
+  </header>
+
+  <!-- Main Application Container -->
+  <div class="app-layout">
+    <!-- Left Sidebar: Controls & Thematic Suites -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <h2><i class="fa-solid fa-sliders"></i> Control Center</h2>
+        <button id="btn-toggle-sidebar" class="icon-btn" title="Collapse Sidebar">
+          <i class="fa-solid fa-chevron-left"></i>
+        </button>
+      </div>
+
+      <!-- Quick Region of Interest (ROI) Preset Selector -->
+      <div class="control-group">
+        <label for="roi-select"><i class="fa-solid fa-location-dot"></i> Focus Region (Pakistan AOI):</label>
+        <div class="select-wrapper">
+          <select id="roi-select">
+            <option value="pakistan" selected>🇵🇰 Whole Pakistan (National View)</option>
+            <option value="indus_flood">🌊 Indus Floodplains & Lake Manchar (Sindh)</option>
+            <option value="hunza_glof">🏔️ Hunza & Karakoram (Glacial Lakes / GLOF)</option>
+            <option value="punjab_stubble">🌾 Punjab Agricultural Belt (Stubble Fires)</option>
+            <option value="jacobabad_heat">🔥 Jacobabad & Sibbi (Extreme Heatwave LST)</option>
+            <option value="indus_mangroves">🌿 Indus Delta & Thatta (Mangroves)</option>
+            <option value="karachi_urban">🏙️ Karachi Megacity (Urban & Coast)</option>
+            <option value="islamabad_margalla">🌲 Islamabad & Margalla Hills (Watershed)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Thematic Suites Tabs -->
+      <div class="control-group">
+        <label><i class="fa-solid fa-cubes"></i> 7 Thematic Suites (37 Apps):</label>
+        <div class="suite-tabs" id="suite-tabs">
+          <button class="suite-tab active" data-suite="water" title="Surface Water & Flood Dynamics">
+            <i class="fa-solid fa-water"></i> Water & Floods
+          </button>
+          <button class="suite-tab" data-suite="watershed" title="Watershed & Catchment Hydrology">
+            <i class="fa-solid fa-mountain-city"></i> Watersheds
+          </button>
+          <button class="suite-tab" data-suite="climate" title="Climate, Heatwaves & Weather">
+            <i class="fa-solid fa-temperature-arrow-up"></i> Climate & LST
+          </button>
+          <button class="suite-tab" data-suite="wildfire" title="Wildfire & Crop Stubble Burning">
+            <i class="fa-solid fa-fire"></i> Fire & Smog
+          </button>
+          <button class="suite-tab" data-suite="lulc" title="LULC & Mangroves">
+            <i class="fa-solid fa-tree"></i> LULC & Forest
+          </button>
+          <button class="suite-tab" data-suite="population" title="Demographics & Urbanization">
+            <i class="fa-solid fa-users"></i> Population
+          </button>
+          <button class="suite-tab" data-suite="toolkit" title="EO Toolkit & Exporter">
+            <i class="fa-solid fa-toolbox"></i> EO Toolkit
+          </button>
+        </div>
+      </div>
+
+      <!-- Active Suite Module Details & Apps List -->
+      <div class="control-group">
+        <label for="app-select"><i class="fa-solid fa-microchip"></i> Active Module (Synthesized App):</label>
+        <div class="select-wrapper">
+          <select id="app-select">
+            <!-- Populated dynamically via app.js -->
+          </select>
+        </div>
+      </div>
+
+      <!-- Dynamic Layer Description & Metrics -->
+      <div class="module-card" id="module-card">
+        <div class="module-badge" id="module-badge">Suite 1 • App 1</div>
+        <h3 id="module-title">2022 Historic Floods (Sentinel-1 SAR)</h3>
+        <p id="module-desc">High-precision radar backscatter change detection mapping inundated farmlands and towns in Sindh and Balochistan.</p>
+        <div class="dataset-tags" id="dataset-tags">
+          <span class="tag">COPERNICUS/S1_GRD</span>
+          <span class="tag">Synthetic Aperture Radar</span>
+        </div>
+      </div>
+
+      <!-- Layer Display Controls -->
+      <div class="control-group">
+        <label><i class="fa-solid fa-sliders"></i> Layer Opacity & Settings:</label>
+        <div class="slider-row">
+          <span>Opacity:</span>
+          <input type="range" id="opacity-slider" min="0" max="100" value="85">
+          <span id="opacity-val">85%</span>
+        </div>
+        <div class="slider-row">
+          <span>Date Filter:</span>
+          <select id="timeframe-select" class="mini-select">
+            <option value="2022_flood" selected>2022 Peak Monsoon (Aug-Sep)</option>
+            <option value="2022_pre">2022 Pre-Flood (May)</option>
+            <option value="2023_normal">2023 Recovery Baseline</option>
+            <option value="historical_36yr">36-Year Time Series (1984-2021)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Interactive Actions -->
+      <div class="action-buttons">
+        <button id="btn-run-analysis" class="btn-block btn-execute">
+          <i class="fa-solid fa-bolt"></i> Apply Analysis on Map
+        </button>
+        <button id="btn-export-geotiff" class="btn-block btn-secondary">
+          <i class="fa-solid fa-file-export"></i> Export Active Layer / GeoTIFF
+        </button>
+      </div>
+
+      <!-- Legend Panel -->
+      <div class="legend-panel" id="legend-panel">
+        <h4><i class="fa-solid fa-list-check"></i> Layer Legend</h4>
+        <div id="legend-items">
+          <!-- Dynamic legend entries -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center & Right: Map Viewport -->
+    <main class="map-container">
+      <div id="map" class="map-viewport"></div>
+
+      <!-- Swipe Divider (when in swipe mode) -->
+      <div id="swipe-container" class="swipe-overlay hidden">
+        <input type="range" id="swipe-slider" min="0" max="100" value="50">
+        <div id="swipe-line" class="swipe-line" style="left: 50%;">
+          <div class="swipe-handle"><i class="fa-solid fa-arrows-left-right"></i></div>
+        </div>
+      </div>
+
+      <!-- Floating Map Header / Tool Overlay -->
+      <div class="map-floating-bar">
+        <div class="floating-item">
+          <span class="pulse-dot"></span>
+          <span id="floating-status">Module: 2022 Flood Inundation • Indus Basin</span>
+        </div>
+        <div class="floating-controls">
+          <button id="btn-toggle-basemap" class="mini-tool" title="Cycle Basemap (Satellite / Dark / Topo)">
+            <i class="fa-solid fa-map"></i> <span>Basemap</span>
+          </button>
+          <button id="btn-toggle-analytics" class="mini-tool active" title="Toggle Pakistan Analytics Drawer">
+            <i class="fa-solid fa-chart-line"></i> <span>Analytics</span>
+          </button>
+          <button id="btn-reset-zoom" class="mini-tool" title="Reset View to Pakistan">
+            <i class="fa-solid fa-expand"></i> <span>Reset Zoom</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Collapsible Bottom Analytics & Time-Series Drawer -->
+      <div class="analytics-drawer" id="analytics-drawer">
+        <div class="drawer-header">
+          <div class="drawer-title">
+            <i class="fa-solid fa-chart-pie"></i>
+            <span id="drawer-heading">Pakistan Geospatial Analytics & Time Series</span>
+          </div>
+          <div class="drawer-summary-stats" id="drawer-summary-stats">
+            <div class="stat-chip">
+              <span class="chip-label">Flooded Area:</span>
+              <span class="chip-value" id="stat-flooded">8.2M Hectares</span>
+            </div>
+            <div class="stat-chip">
+              <span class="chip-label">Max Summer LST:</span>
+              <span class="chip-value text-red" id="stat-temp">51.4 °C</span>
+            </div>
+            <div class="stat-chip">
+              <span class="chip-label">Glacial Lakes:</span>
+              <span class="chip-value text-cyan" id="stat-glaciers">3,044 Lakes</span>
+            </div>
+            <div class="stat-chip">
+              <span class="chip-label">Mangrove Extent:</span>
+              <span class="chip-value text-green" id="stat-mangroves">+35% Growth</span>
+            </div>
+          </div>
+          <button id="btn-minimize-drawer" class="icon-btn" title="Minimize Drawer">
+            <i class="fa-solid fa-chevron-down"></i>
+          </button>
+        </div>
+
+        <div class="drawer-content">
+          <div class="chart-wrapper">
+            <canvas id="analytics-chart"></canvas>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Earth Engine Studio Modal -->
+  <div class="modal-overlay hidden" id="gee-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-brands fa-google"></i>
+          <div>
+            <h3>Google Earth Engine Master Script</h3>
+            <p>Ready to execute directly in <a href="https://code.earthengine.google.com/" target="_blank" rel="noopener">code.earthengine.google.com</a></p>
+          </div>
+        </div>
+        <button id="btn-close-modal" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="code-toolbar">
+          <span><i class="fa-solid fa-code"></i> EarthEngine_Pakistan_Master_App.js (Consolidating 37 Apps)</span>
+          <div class="code-btns">
+            <button id="btn-copy-code" class="btn-sm"><i class="fa-regular fa-copy"></i> Copy to Clipboard</button>
+            <a href="EarthEngine_Pakistan_Master_App.js" download="EarthEngine_Pakistan_Master_App.js" class="btn-sm btn-outline">
+              <i class="fa-solid fa-download"></i> Download .js
+            </a>
+          </div>
+        </div>
+        <pre><code id="gee-code-container">Loading Google Earth Engine Script...</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  
+  <!-- Main Application Logic -->
+  <script src="app.js"></script>
+</body>
+</html>

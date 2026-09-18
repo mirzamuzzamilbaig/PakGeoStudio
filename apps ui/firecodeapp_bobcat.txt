@@ -1,0 +1,1218 @@
+var goes16fdcf = ui.import && ui.import("goes16fdcf", "imageCollection", {
+      "id": "NOAA/GOES/16/FDCF"
+    }) || ee.ImageCollection("NOAA/GOES/16/FDCF"),
+    goes17fdcf = ui.import && ui.import("goes17fdcf", "imageCollection", {
+      "id": "NOAA/GOES/17/FDCF"
+    }) || ee.ImageCollection("NOAA/GOES/17/FDCF"),
+    s2SR = ui.import && ui.import("s2SR", "imageCollection", {
+      "id": "COPERNICUS/S2_SR"
+    }) || ee.ImageCollection("COPERNICUS/S2_SR"),
+    s2c = ui.import && ui.import("s2c", "imageCollection", {
+      "id": "COPERNICUS/S2_CLOUD_PROBABILITY"
+    }) || ee.ImageCollection("COPERNICUS/S2_CLOUD_PROBABILITY"),
+    MTBS = ui.import && ui.import("MTBS", "table", {
+      "id": "projects/GlobalFires/MTBS/MTBS_Perims"
+    }) || ee.FeatureCollection("projects/GlobalFires/MTBS/MTBS_Perims"),
+    dynamic = ui.import && ui.import("dynamic", "imageCollection", {
+      "id": "GOOGLE/DYNAMICWORLD/V1"
+    }) || ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1"),
+    nlcd = ui.import && ui.import("nlcd", "imageCollection", {
+      "id": "USGS/NLCD_RELEASES/2019_REL/NLCD"
+    }) || ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD"),
+    counties = ui.import && ui.import("counties", "table", {
+      "id": "TIGER/2018/Counties"
+    }) || ee.FeatureCollection("TIGER/2018/Counties");
+// *****************************************************************
+// =================================================================
+// --------------------- U.S. Fire Dashboard -------------------- ||
+// =================================================================
+// *****************************************************************
+/*
+// @author Tianjia Liu (tianjialiu@g.harvard.edu)
+// Last updated: December 14, 2020
+*/
+// =================================================================
+// **********************   --    Code    --   *********************
+// =================================================================
+
+var today = new Date();
+
+// Time and location of the fire
+var fireInfo = require('users/tl2581/USCanadaFires:FireDashboard/largeFiresInfo.js');
+
+var yrList = fireInfo.yrList;
+var fireYrList = fireInfo.fireYrList;
+var fireParamsList = fireInfo.fireParamsList;
+var timeZoneList = fireInfo.timeZoneList;
+
+var federalAgencyInfoTable = fireInfo.federalAgencyInfoTable;
+var stateAgencyInfoTable = fireInfo.stateAgencyInfoTable;
+var countyAgencyInfoTable = fireInfo.countyAgencyInfoTable;
+
+var fire_confidence_palette = ['white', 'yellow', 'orange', 'red', 'purple'];
+var burn_severity_palette = ['yellow','orange','red','darkred'];
+var burn_severity_labels = ['Low','Moderate-Low','Moderate-High','High'];
+
+var UTCtoLT = function(date,tz) {
+  return ee.Date(ee.Date(date,'UTC')).format('MMM d, Y HH',tz);
+};
+
+var getFireConf = function(area_of_interest,fireDict,endTime) {
+
+ // Satellite data
+  var goes_16_data = goes16fdcf
+    .filterDate(fireDict.start,endTime).select('Mask');
+
+  var goes_17_data = goes17fdcf
+    .filterDate(fireDict.start,endTime).select('Mask');
+
+  // Conversion from mask codes to confidence values
+  var confidence_codes_to_values = function(confidence) {
+    return confidence.expression(
+    '(conf==1.0) + (conf==2.0)*0.9 + (conf==3.0)*0.8 + (conf==4.0)*0.5 + (conf==5.0)*0.3 + (conf==6.0)*0.1',
+      {conf: confidence});
+  };
+
+  var setPixCount = function(image) {
+    var pixels = image.lte(35).rename('pixels')
+      .reduceRegion({
+        geometry: area_of_interest,
+        reducer: ee.Reducer.sum().unweighted()
+      }).getNumber('pixels');
+
+    if (fireDict.minPix !== undefined) {
+      var hrDiff = ee.Date(image.get('system:time_start'))
+        .difference(fireDict.start,'hour').round();
+      image = image.set('hrOffset',hrDiff);
+    }
+
+    return image.set('pixels',pixels);
+  };
+
+  var getGOESconf = function(goes_data) {
+    var goes_confidence = goes_data
+      .map(setPixCount).filter(ee.Filter.gt('pixels',0));
+    var nImg = goes_confidence.size();
+
+    if (fireDict.minPix !== undefined) {
+      goes_confidence = goes_confidence.filter(ee.Filter.lt('hrOffset',24))
+        .merge(goes_confidence.filter(ee.Filter.gte('hrOffset',24))
+          .filter(ee.Filter.gt('pixels',fireDict.minPix)));
+    }
+
+    return ee.Image(ee.Algorithms.If(nImg.gt(0),
+      goes_confidence
+        .map(function(image) {
+          return image.updateMask(image.lte(35))
+          .mod(10).add(1).toInt();
+        }).min().unmask(0),
+      ee.Image(0))).rename('confidence');
+  };
+
+  var goes_16_max_confidence = confidence_codes_to_values(getGOESconf(goes_16_data));
+  var goes_17_max_confidence = confidence_codes_to_values(getGOESconf(goes_17_data));
+
+  var combined_confidence = ee.ImageCollection([
+    goes_16_max_confidence,
+    goes_17_max_confidence,
+  ]).mean();
+
+  var kernel = ee.Kernel.square(2000, 'meters', true);
+  var smoothed_confidence = combined_confidence.clip(area_of_interest)
+    .reduceNeighborhood({
+      'reducer': ee.Reducer.mean(),
+      'kernel': kernel,
+      'optimization': 'boxcar'
+    });
+
+  return smoothed_confidence;
+};
+
+var getFirePerim = function(fireDict,area_of_interest,smoothed_confidence,confidence_cutoff) {
+  var high_confidence = smoothed_confidence.gt(confidence_cutoff);
+
+  var affected_areas = high_confidence
+    .reduceToVectors({
+      scale: 100,
+      maxPixels: 1e10,
+      geometry: area_of_interest,
+      tileScale: fireDict.tileScale,
+      bestEffort: true
+    }).filter(ee.Filter.eq('label', 1));
+
+  return affected_areas;
+};
+
+var getFirePerimImg = function(affected_areas, width) {
+  var smooth = function(feature) {
+    var max_error_meters = 200;
+    return ee.Feature(feature).simplify(max_error_meters);
+  };
+
+  var affected_areas_smoothed = ee.FeatureCollection(affected_areas)
+    .map(smooth);
+  var affected_areas_smoothed_outline = ee.Image().byte()
+    .paint({featureCollection: affected_areas_smoothed, width: width});
+
+  return affected_areas_smoothed_outline;
+};
+
+// Land cover, NLCD
+var landcover = nlcd.filter(ee.Filter.calendarRange(2019,2019,'year')).first()
+  .select('landcover');
+var nlcdProj = nlcd.first().projection();
+
+var lc_labels = ['Water','Snow/Ice','Developed','Barren','Forest','Shrub','Grassland','Cropland','Wetlands'];
+var lc_palette = ['#466b9f','#d1def8','#000000','#b3ac9f','#68ab5f',
+  '#ccb879','#dfdfc2','#ab6c28','#b8d9eb'];
+
+var landcover = landcover.expression(
+  '(lc==11) + (lc==12)*2 + (lc>=21 & lc<=24)*3 + (lc==31)*4' +
+  '+ (lc>=41 & lc<=43)*5 + (lc==52)*6 + (lc==71)*7' +
+  '+ (lc>=81 & lc<=82)*8 + (lc>=90 & lc<=95)*9',
+    {lc: landcover});
+
+// Land cover, Dynamic World
+var dynamicProj = dynamic.first().projection();
+
+var dynamic_labels = [
+  'Water', 'Trees', 'Grass', 'Flooded Vegetation', 'Crops', 'Shrub/Scrub',
+  'Built', 'Bare', 'Snow/Ice'
+];
+var dynamic_palette = [
+  '#419BDF', '#397D49', '#88B053', '#7A87C6', '#E49635', '#DFC35A',
+  '#C4281B', '#A59B8F', '#B39FE1'
+];
+
+var filtered = counties.filter(ee.Filter.eq('NAMELSAD', 'Dane County'));
+var geometry = filtered.geometry();
+Map.centerObject(geometry, 10);
+
+var dwVisParams = {
+  min: 0,
+  max: 8,
+  palette: [
+    '#419BDF', '#397D49', '#88B053', '#7A87C6', '#E49635', '#DFC35A',
+    '#C4281B', '#A59B8F', '#B39FE1'
+  ]
+};
+
+var probabilityBands = [
+  'water', 'trees', 'grass', 'flooded_vegetation', 'crops', 'shrub_and_scrub',
+  'built', 'bare', 'snow_and_ice'
+];
+
+var getDynamic = function(fireDict,area_of_interest) {
+
+  var dnbr_dates = {
+    'preS': ee.Date(fireDict.start).advance(-16,'day'),
+    'postE': ee.Date(fireDict.end).advance(15,'day')
+  };
+
+  var dw = dynamic
+    .filterDate(dnbr_dates.preS,dnbr_dates.postE)
+    .filterBounds(area_of_interest);
+
+  var classification = dw.select('label');
+  var dwComposite = classification.reduce(ee.Reducer.mode());
+
+  var probabilityBands = [
+    'water', 'trees', 'grass', 'flooded_vegetation', 'crops', 'shrub_and_scrub',
+    'built', 'bare', 'snow_and_ice'
+  ];
+
+  // Select probability bands.
+  var probabilityCol = dw.select(probabilityBands);
+
+  // Create an image with the average pixel-wise probability
+  // of each class across the time-period.
+  var meanProbability = probabilityCol.reduce(ee.Reducer.mean());
+
+  var projection = ee.Projection('EPSG:3857').atScale(10);
+  meanProbability = meanProbability.setDefaultProjection(projection);
+
+  // Create the Top-1 Probability Hillshade.
+  var top1Probability = meanProbability.reduce(ee.Reducer.max());
+  var top1Confidence = top1Probability.multiply(100).int();
+  var hillshade = ee.Terrain.hillshade(top1Confidence).divide(255);
+  var rgbImage = dwComposite.visualize(dwVisParams).divide(255);
+  var probabilityHillshade = rgbImage.multiply(hillshade);
+
+  return probabilityHillshade;
+};
+
+
+// Calculate burned area within fire perimeter, in acres
+var getFireArea = function(fireDict,affected_areas) {
+  var burn_lc = landcover.expression('(lc >= 5 & lc <= 7)', {lc: landcover}).selfMask();
+
+  return burn_lc.rename('area').reduceRegion({
+      reducer: ee.Reducer.count().unweighted(),
+      geometry: affected_areas.geometry(),
+      crs: nlcdProj,
+      scale: nlcdProj.nominalScale(),
+      tileScale: fireDict.tileScale,
+      bestEffort: true
+     }).getNumber('area')
+      .multiply(30*30*0.000247105).round();
+};
+
+var indexJoin = function(collectionA, collectionB, propertyName) {
+  var joined = ee.ImageCollection(ee.Join.saveFirst(propertyName).apply({
+    primary: collectionA,
+    secondary: collectionB,
+    condition: ee.Filter.equals({
+      leftField: 'system:index',
+      rightField: 'system:index'})
+  }));
+
+  return joined.map(function(image) {
+    return image.addBands(ee.Image(image.get(propertyName)));
+  });
+};
+
+var NBRwithCloudsMasked = function(image) {
+  var cloudProb = image.select('probability');
+  var isCloud = cloudProb.gt(65);
+  return image.normalizedDifference(['B8','B12']).rename('NBR')
+    .updateMask(isCloud.not())
+    .copyProperties(image,['system:time_start']);
+};
+
+var getBurnSeverity = function(fireDict, area_of_interest, fireConf) {
+
+  var dnbr_dates = {
+    'preS': ee.Date(fireDict.start).advance(-16,'day'),
+    'preE': ee.Date(fireDict.start).advance(-2,'day'),
+    'postS': ee.Date(fireDict.end),
+    'postE': ee.Date(fireDict.end).advance(15,'day')
+  };
+
+  var s2SR_aoi = s2SR.select(['B8','B12'])
+    .filterBounds(area_of_interest)
+    .filterDate(dnbr_dates.preS,dnbr_dates.postE);
+
+  var s2c_aoi = s2c.filterBounds(area_of_interest)
+    .filterDate(dnbr_dates.preS,dnbr_dates.postE);
+
+  var s2NBRcol = indexJoin(s2SR_aoi,s2c_aoi,'probability')
+    .map(NBRwithCloudsMasked);
+
+  var preFire = s2NBRcol.filterDate(dnbr_dates.preS,dnbr_dates.preE).max();
+  var postFire = s2NBRcol.filterDate(dnbr_dates.postS,dnbr_dates.postE).min();
+
+  var dNBR = preFire.subtract(postFire).rename('dNBR');
+
+  dNBR = dNBR.expression('(dNBR > 0.15 & dNBR <= 0.27) + (dNBR > 0.27 & dNBR <= 0.44)*2' +
+    '+ (dNBR > 0.44 & dNBR <= 0.66)*3 + (dNBR > 0.66 & dNBR <= 1.3)*4',
+    {dNBR: dNBR});
+
+  var dNBRmask;
+  if (fireDict.tileScale < 8) {
+    dNBRmask = dNBR.selfMask().reduceNeighborhood({
+      reducer: ee.Reducer.count(),
+      kernel: ee.Kernel.square(1),
+      optimization:'boxcar'
+    }).gt(4);
+  } else {
+     dNBRmask = dNBR.selfMask();
+  }
+
+  return dNBR.updateMask(dNBRmask)
+    .updateMask(landcover.expression('(lc >= 3 & lc <= 7)', {lc: landcover}))
+    .updateMask(fireConf.gt(0.25));
+};
+
+var getFireAreaSeverity = function(fireDict,burnSeverity,area_of_interest) {
+
+  var fireAreaDict;
+  if (fireDict.severityArea === undefined) {
+    var fireAreaHist = burnSeverity
+      .reduceRegion({
+        reducer: ee.Reducer.fixedHistogram(1,5,4).unweighted(),
+        geometry: area_of_interest,
+        crs: nlcdProj,
+        scale: nlcdProj.nominalScale(),
+        tileScale: fireDict.tileScale,
+        bestEffort: true
+       }).toArray().slice(1,1,2).project([0]);
+
+    fireAreaDict = ee.Dictionary({
+      'All': fireAreaHist.accum(0).get([3]),
+      'Low': fireAreaHist.get([0]),
+      'Moderate-Low': fireAreaHist.get([1]),
+      'Moderate-High': fireAreaHist.get([2]),
+      'High': fireAreaHist.get([3])
+    });
+
+    fireAreaDict = fireAreaDict.map(function(x,y) {
+      return ee.Number(y).multiply(30*30*0.000247105).round()});
+
+    return ee.FeatureCollection([
+      ee.Feature(null, {
+        'ID': '',
+        'Low': fireAreaDict.get('Low'),
+        'Moderate-Low': fireAreaDict.get('Moderate-Low'),
+        'Moderate-High': fireAreaDict.get('Moderate-High'),
+        'High': fireAreaDict.get('High')
+      }),
+      ee.Feature(null, {
+        'ID': '',
+        'Total': fireAreaDict.get('All')
+      }),
+    ]);
+  } else {
+    fireAreaDict = fireDict.severityArea;
+    return ee.FeatureCollection([
+      ee.Feature(null, {
+        'ID': '',
+        'Low': fireAreaDict[0],
+        'Moderate-Low': fireAreaDict[1],
+        'Moderate-High': fireAreaDict[2],
+        'High': fireAreaDict[3]
+      }),
+      ee.Feature(null, {
+        'ID': '',
+        'Total': fireAreaDict[4]
+      }),
+    ]);
+  }
+};
+
+
+// Charts
+var getFireProgression = function(fireDict,area_of_interest) {
+  var nHour = ee.Date(fireDict.end).difference(fireDict.start,'hour').floor();
+
+  var fireAreaByHour = ee.List.sequence(1,nHour,fireDict.timeInterval)
+    .map(function(iStep) {
+      var stTime = fireDict.start;
+      var endTime = stTime.advance(iStep,'hour');
+
+      var smoothed_confidence = getFireConf(area_of_interest,fireDict,endTime);
+      var affected_areas99 = getFirePerim(fireDict,area_of_interest,smoothed_confidence,0.99);
+      var affected_areas90 = getFirePerim(fireDict,area_of_interest,smoothed_confidence,0.9);
+      var affected_areas75 = getFirePerim(fireDict,area_of_interest,smoothed_confidence,0.75);
+
+      return ee.Feature(affected_areas90.geometry(), {
+          timeStep: iStep,
+          P75: getFireArea(fireDict,affected_areas75),
+          P90: getFireArea(fireDict,affected_areas90),
+          P99: getFireArea(fireDict,affected_areas99),
+        });
+    });
+
+  return ee.FeatureCollection(fireAreaByHour);
+};
+
+var getFireProgImgAnim = function(area_of_interest,fireAreaByHour) {
+
+  fireAreaByHour = fireAreaByHour.filter(ee.Filter.gt('P90',0));
+
+  var fireBounds = fireAreaByHour.sort('timeStep',false).first()
+    .geometry().buffer(800).bounds();
+
+  var ignition = ee.Feature(fireAreaByHour.first()
+    .geometry().centroid(100).buffer(area_of_interest.perimeter().divide(750)),
+    {'ID': 1});
+
+  var getFireProgImg = function(fireAreaByHour) {
+
+    var max_error_meters = 200;
+    var affected_areas_smoothed = ee.Feature(fireAreaByHour).simplify(max_error_meters);
+    var affected_areas_smoothed_outline = ee.Image().float()
+      .paint(affected_areas_smoothed, 1, 4)
+      .paint(ignition, 1);
+
+    return affected_areas_smoothed_outline.visualize({palette: ['white']});
+  };
+
+  var fireProgImgs = ee.ImageCollection(fireAreaByHour.map(getFireProgImg));
+
+  var fireProgImgAnim = ui.Thumbnail({
+    image: fireProgImgs,
+    params: {
+      crs: 'EPSG:4326',
+      dimensions: '500',
+      region: fireBounds,
+      framesPerSecond: 6,
+    },
+    style: {
+      position: 'bottom-right',
+      width: '200px',
+      border: '1px solid black'
+    }});
+
+  return ui.Panel({widgets: [fireProgImgAnim],
+    style: {margin: '0px 8px 8px 90px'}});
+};
+
+var chartFireProgression = function(fireDict,fireAreaByHour,localStartTime) {
+  var fireProgression = ui.Chart.feature.byFeature({
+    features: fireAreaByHour,
+    xProperty: 'timeStep',
+    yProperties: ['P99','P90','P75']
+  }).setSeriesNames(['>99%','>90%','>75%'])
+    .setOptions({
+      title: 'Fire Progression (' + fireDict.timeInterval + 'h intervals)',
+      titleTextStyle: {fontSize: '15'},
+    vAxis: {
+      title: 'Burned Area (acres)',
+      titleTextStyle: {fontSize: '12'},
+    },
+    hAxis: {
+      title: 'Hours Since ' + localStartTime + 'h (LT)',
+      titleTextStyle: {fontSize: '12'},
+    },
+    series: {
+      0: {color: '#D3D3D3',lineWidth: 1.5},
+      1: {color: '#000000',lineWidth: 2.5},
+      2: {color: '#D3D3D3',lineWidth: 1.5}
+    }
+  });
+
+  return fireProgression;
+};
+
+var chartActiveFires = function(fireDict,area_of_interest,localStartTime) {
+
+  // Satellite data
+  var goes16_data = goes16fdcf.select('Mask');
+  var goes17_data = goes17fdcf.select('Mask');
+
+  var goes16proj = goes16_data.first().projection();
+  var goes17proj = goes17_data.first().projection();
+
+  var getPixCount = function(goes16,goes17) {
+    var goes16_pixels = ee.Number(ee.Algorithms.If(
+      goes16.size().gt(0),
+      goes16.min().lte(35).rename('pixels')
+      .reduceRegion({
+        geometry: area_of_interest,
+        reducer: ee.Reducer.sum().unweighted(),
+        crs: goes16proj,
+        scale: goes16proj.nominalScale(),
+      }).getNumber('pixels'),0));
+
+    var goes17_pixels = ee.Number(ee.Algorithms.If(
+      goes17.size().gt(0),
+      goes17.min().lte(35).rename('pixels')
+      .reduceRegion({
+        geometry: area_of_interest,
+        reducer: ee.Reducer.sum().unweighted(),
+        crs: goes17proj,
+        scale: goes17proj.nominalScale(),
+      }).getNumber('pixels'),0));
+
+    return ee.Feature(null,{'GOES-16':goes16_pixels, 'GOES-17':goes17_pixels,
+      'GOES': ee.List([goes16_pixels,goes17_pixels]).reduce(ee.Reducer.max())
+    });
+  };
+
+  var nHour = ee.Date(fireDict.end).difference(fireDict.start,'hour').floor();
+
+  var activeFiresByHour = ee.List.sequence(1,nHour,1).map(function(iStep) {
+    var stTime = ee.Date(fireDict.start)
+      .advance(ee.Number(iStep).subtract(1),'hour');
+    var endTime = stTime.advance(1,'hour');
+
+    var goes16hr = goes16_data.filterDate(stTime,endTime);
+    var goes17hr = goes17_data.filterDate(stTime,endTime);
+
+    return getPixCount(goes16hr,goes17hr).set('timeStep',iStep);
+  });
+
+  return ui.Chart.feature.byFeature({
+    features: ee.FeatureCollection(activeFiresByHour),
+    xProperty: 'timeStep',
+    yProperties: ['GOES']
+  }).setOptions({
+      title: 'Active Fire Pixels',
+      titleTextStyle: {fontSize: '15'},
+    vAxis: {
+      title: 'Maximum Count',
+      titleTextStyle: {fontSize: '12'},
+    },
+    hAxis: {
+      title: 'Hours Since ' + localStartTime + 'h (LT)',
+      titleTextStyle: {fontSize: '12'},
+    },
+    legend: {position: 'none'},
+    series: {
+      0: {color: '#B03A2E', lineWidth: 1.5}
+    }
+  });
+};
+
+var getMTBStable = function(area_of_interest) {
+  var maxYear = ee.Number.parse(fireYrSelect.getValue());
+
+  var MTBSregion = MTBS.filterBounds(area_of_interest)
+    .filter(ee.Filter.stringStartsWith('Fire_Type','Wildfire'))
+    .filter(ee.Filter.lt('Year',maxYear))
+    .sort('Year',false);
+
+
+  var capitalize = function(string) {
+    var splitString = ee.String(string).split(' ');
+    var capString = splitString.map(function(x) {
+      return ee.String(x).slice(0,1)
+        .cat(ee.String(x).slice(1,100).toLowerCase());
+    });
+    return capString.iterate(function(x,first) {
+      return ee.String(first).cat(' ').cat(ee.String(x))},ee.String(''));
+  };
+
+  var fireTable = ee.Algorithms.If(MTBSregion.size().gt(0),
+    MTBSregion.select(['Fire_Name','Year','Acres'],['Fire Name','Year','Acres'])
+      .map(function(feature) {
+        return feature.set('Year',feature.getNumber('Year').toInt().format())
+          .set('Fire Name',capitalize(feature.getString('Fire Name')));
+      }),
+    ee.FeatureCollection([ee.Feature(null, {'Fire Name':'','Year':'','Acres':''})]));
+
+  return ui.Chart.feature.byFeature(ee.FeatureCollection(fireTable),
+    'Fire Name',['Year','Acres']).setChartType('Table');
+};
+
+// Legends
+var getLayerCheckSimple = function(map, label, value, layerPos) {
+  var checkLayer = ui.Checkbox({label: label, value: value,
+    style: {fontWeight: 'bold', fontSize: '15px', margin: '2px 3px 0px 8px'}});
+
+  checkLayer.onChange(function(checked) {
+    var mapLayer = map.layers().get(layerPos);
+    mapLayer.setShown(checked);
+  });
+
+  return ui.Panel([checkLayer],ui.Panel.Layout.flow('horizontal'));
+};
+
+var getLegendContinuous = function(minVal, maxVal, colPal) {
+
+  var vis = {min: minVal, max: maxVal, palette: colPal};
+
+  var makeColorBarParams = function(palette) {
+    return {
+      bbox: [0, 0, 1, 0.1],
+      dimensions: '120x10',
+      format: 'png',
+      min: 0,
+      max: 1,
+      opacity: 0.4,
+      palette: palette,
+    };
+  };
+
+  var colorBar = ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select(0),
+    params: makeColorBarParams(vis.palette),
+    style: {stretch: 'horizontal', margin: '3px 8px 0px 8px', height: '18px'},
+  });
+
+  var legendLabels = ui.Panel({
+    widgets: [
+      ui.Label(vis.min, {margin: '4px 8px'}),
+      ui.Label('',
+        {margin: '4px 8px', textAlign: 'center', stretch: 'horizontal'}),
+      ui.Label(vis.max, {margin: '4px 8px'}),
+      ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+
+  var legendPanel = ui.Panel({
+    widgets: [colorBar, legendLabels],
+    style: {
+      margin: '2px 10px 0px 0px',
+    }});
+
+  return legendPanel;
+};
+
+var getLegendDiscrete = function(title, labels, colPal, footnote) {
+
+  var legendPanel = ui.Panel({
+    style: {
+      padding: '0 8px 0 0',
+      position: 'bottom-left',
+      width: '150px',
+      maxHeight: '80%',
+      margin: '0'
+    }
+  });
+
+  var makeRow = function(colPal, labels) {
+    var colorBox = ui.Label({
+      style: {
+        padding: '10px',
+        margin: '0px 0 4px 8px',
+        fontSize: '12.5px',
+        backgroundColor: colPal,
+      }
+    });
+
+    var description = ui.Label({value: labels, style: {margin: '2px 1px 4px 6px', fontSize: '12.5px'}});
+    return ui.Panel({widgets: [colorBox, description], layout: ui.Panel.Layout.Flow('horizontal')});
+  };
+
+  for (var i = 0; i < labels.length; i++) {
+    legendPanel.add(makeRow(colPal[i], labels[i]));
+  }
+
+  if (footnote) {
+    var legendFootnote = ui.Label(footnote, {
+      margin: '5px 2px 0px 8px',
+      fontSize: '10px',
+      color: '#777'
+    });
+    legendPanel.add(legendFootnote);
+  }
+
+  return legendPanel;
+};
+
+
+var getInfoPanel = function(map,fireDict,fireName,fireArea,fireAreaSeverity) {
+  var infoPanel = ui.Panel(
+    {style: {width: '200px'},
+  });
+
+  infoPanel.add(ui.Label('Fire Information',
+    {fontSize:'18px',fontWeight:'bold',margin: '8px 0 0 0'}));
+
+  // infoPanel.add(ui.Label('Visit city websites for detailed emergency updates.',
+  // {fontSize:'12.5px', margin:'0', padding:'5px 12px 0 0'}));
+
+  var agencyInfoTable = countyAgencyInfoTable.filter(ee.Filter.inList('County',fireDict.county))
+    .merge(stateAgencyInfoTable.filter(ee.Filter.eq('State',fireDict.state)))
+    .merge(federalAgencyInfoTable);
+
+  var infoLinksTable = ui.Panel({
+    widgets: [ui.Chart.feature.byFeature(agencyInfoTable,
+      'Agency', ['Details']
+    ).setChartType('Table').setOptions({allowHtml: true})],
+    style: {margin: '0 8px -3px -8px'}
+  });
+
+  // infoPanel.add(infoLinksTable);
+
+  infoPanel.add(ui.Label('This map shows the most up-to-date wildfire perimeter (confidence and outline, expressed by confidence cutoffs at 90% [99%,75%]) using GOES-16/17 satellite imagery. Note that the GOES spatial resolution is coarse (2 km), so the GOES-derived burned area may differ substantially from the official estimate. Burned area is calculated as the area of vegetated pixels (shrub, forest, and grassland) within the fire perimeter.',
+    {fontSize:'12.5px', margin:'0', padding:'5px 12px 0 0'}));
+
+  infoPanel.add(ui.Label('@googleearth code for mapping wildfire boundaries',{fontSize:'12px',margin:'2px 0 0 0',color: '#5886E8'},
+    'https://medium.com/google-earth/how-to-generate-wildfire-boundary-maps-with-earth-engine-b38eadc97a38'));
+
+  var fireInfo = ee.FeatureCollection([
+    ee.Feature(null, {
+      'Source': 'Official',
+      'Burned Area (Acres)': ee.Number(fireDict.official).format()
+    }),
+    ee.Feature(null, {
+      'Source': 'Satellite (GOES)',
+      'Burned Area (Acres)': fireArea[0].toInt().format().cat(' [')
+        .cat(fireArea[1].toInt().format()).cat(', ')
+        .cat(fireArea[2].toInt().format()).cat(']')
+    }),
+  ]);
+
+  var fireInfoTable = ui.Panel({
+    widgets: [ui.Chart.feature.byFeature(fireInfo,
+      'Source', ['Burned Area (Acres)']
+    ).setChartType('Table')],
+    style: {margin: '0 8px 0 -8px'}
+  });
+
+  infoPanel.add(fireInfoTable);
+  infoPanel.add(getLayerCheckSimple(map, 'Fire Confidence (%)', true, 0, 0.4));
+  infoPanel.add(getLegendContinuous(0,100,fire_confidence_palette));
+
+  if (fireDict.status == 'Final') {
+    infoPanel.add(ui.Label('For fires that reached a \'steady state\' in final burn perimeter, we use Sentinel-2A imagery retrieved during the pre-fire and post-fire periods to map burned area at high spatial resolution (10-m) for various burn severity classes based on the differenced Normalized Burn Ratio (dNBR).',
+      {fontSize:'12.5px', margin:'0', padding:'5px 12px 0 0'}));
+
+    var fireInfoAddTable = ui.Panel({
+      widgets: [
+        ui.Chart.feature.byFeature(fireAreaSeverity,
+          'ID', ['Low','Moderate-Low','Moderate-High','High','Total']
+        ).setChartType('BarChart').setOptions({
+          title: '',
+          isStacked: true,
+          fontSize: '11',
+          vAxis: {
+            title: 'Burned Area (acres)',
+            titleTextStyle: {fontSize: '11'},
+          },
+          series: {
+            0: {color: burn_severity_palette[0]},
+            1: {color: burn_severity_palette[1]},
+            2: {color: burn_severity_palette[2]},
+            3: {color: burn_severity_palette[3]},
+            4: {color: '#000000'},
+          },
+          legend: {textStyle: {fontSize: '11'}},
+          height: '120px'
+        })
+      ],
+      style: {margin: '0 0 0 -12px'}
+    });
+
+    infoPanel.add(fireInfoAddTable);
+  }
+
+  return infoPanel;
+};
+
+// App UI elements
+ui.root.clear();
+
+var Map1 = ui.Map().setOptions('TERRAIN');
+var Map2 = ui.Map().setOptions('TERRAIN');
+
+var controlPanel = ui.Panel({
+  layout: ui.Panel.Layout.flow('horizontal'),
+});
+
+var infoWrapper = ui.Panel(
+  {style: {width: '210px', position: 'bottom-right'}
+});
+
+var mapPanel = ui.Panel({
+  layout: ui.Panel.Layout.flow('horizontal'),
+});
+
+var map_panels = ui.SplitPanel({
+  firstPanel: ui.Panel({widgets: [Map2], style: {width: '0%'}}),
+  secondPanel: ui.Panel({widgets: [Map1], style: {Width: '100%'}}),
+});
+
+var mapGrid = ui.Panel([map_panels],
+  ui.Panel.Layout.Flow('horizontal'), {stretch: 'both'}
+);
+
+var mainTitle = ui.Label('U.S. Fire Dashboard',
+  {stretch: 'horizontal', textAlign: 'left', fontWeight: 'bold',
+    fontSize: '24px', backgroundColor:'FFFFFF', margin: '8px 8px 8px 15px'});
+
+var fireName; var year;
+if (ui.url.get('fire_name') === undefined) {
+  year = '2020';
+} else {
+  fireName = ui.url.get('fire_name');
+  year = ee.Number(ui.url.get('year')).format().getInfo();
+}
+
+var fireYrSelect = ui.Select({
+  items: yrList,
+  value: year,
+  onChange: function(year) {
+    fireSelectPanel.remove(fireSelectPanel.widgets().get(3));
+    var fireSelect = ui.Select({
+    items: fireYrList[year],
+    onChange: function(fireName) {
+      ui.root.clear();
+      ui.root.widgets().reset([mainPanel]);
+      displayFire(fireName);
+    },
+    style: {
+      margin: '8px 15px 8px 8px'
+    }
+  });
+    fireSelectPanel.add(fireSelect);
+  },
+  style: {
+    margin: '8px 15px 8px 8px'
+  }
+});
+
+var fireSelect = ui.Select({
+  items: fireYrList[year],
+  placeholder: '...',
+  onChange: function(fireName) {
+    ui.root.clear();
+    ui.root.widgets().reset([mainPanel]);
+    displayFire(fireName);
+  },
+  style: {
+    margin: '8px 15px 8px 8px'
+  }
+});
+
+var yearSelectInfo = ui.Label('Select a Year: ',
+  {margin: '14px 0px 8px 16px', color: '#333333', fontWeight: 100});
+var fireSelectInfo = ui.Label('Select a Fire: ',
+  {margin: '14px 0px 8px 0px', color: '#333333', fontWeight: 100});
+var fireSelectPanel = ui.Panel([yearSelectInfo,fireYrSelect,fireSelectInfo,fireSelect],
+  ui.Panel.Layout.Flow('horizontal'));
+
+var mainPanel = ui.Panel([mainTitle,fireSelectPanel],
+  ui.Panel.Layout.Flow('horizontal'));
+
+ui.root.onResize(function(deviceInfo) {
+  if (deviceInfo.is_desktop & deviceInfo.width > 900) {
+    mainPanel.setLayout(ui.Panel.Layout.Flow('horizontal'));
+    fireSelectPanel.style().set({margin: '0'});
+  } else {
+    mainPanel.setLayout(ui.Panel.Layout.Flow('vertical'));
+    fireSelectPanel.style().set({margin: '-8px 0 0 0'});
+  }
+});
+
+ui.root.widgets().reset([mainPanel]);
+
+if (ui.url.get('fire_name') === undefined) {
+  var Map1 = ui.Map().setOptions('TERRAIN');
+  Map1.setControlVisibility({mapTypeControl: false, layerList: false});
+  Map1.style().set({cursor:'crosshair'});
+
+  ui.root.add(Map1);
+  ui.root.setLayout(ui.Panel.Layout.Flow('vertical'));
+
+  var fireParamsYrList = fireParamsList[year];
+
+  var availFires = ee.Dictionary(fireParamsYrList).keys().map(function(fireName) {
+    var inFireInfo = ee.Dictionary(ee.Dictionary(fireParamsYrList).get(fireName));
+    return ee.Feature(null, {
+      'Fire Name': fireName,
+      'State': inFireInfo.get('state'),
+      'Start Date': ee.String(inFireInfo.get('stDate')).split(',').get(0),
+      'Acres': inFireInfo.get('official'),
+      'Status': inFireInfo.get('status')
+    }).setGeometry(ee.Geometry(inFireInfo.get('ignition'))
+        .buffer((ee.Number(inFireInfo.get('official')).multiply(4046.86/Math.PI)).sqrt()));
+  });
+
+  availFires = ee.FeatureCollection(availFires);
+  var availFiresTable = ui.Chart.feature.byFeature(ee.FeatureCollection(availFires),
+      'Fire Name', ['State','Start Date','Acres','Status']
+    ).setChartType('Table');
+
+  availFiresTable.onClick(function(clicked) {
+      Map1.centerObject(availFires.filter(ee.Filter.eq('Fire Name',clicked)),11);
+    });
+
+  var availFiresLabel = ui.Label('Select a fire from the dropdown menu in the top-right corner to activate the dashboard. The table below lists the fires currently available in this tool. When clicking on the table, the map will zoom in to that particular fire (depicted as a buffer zone equal to the burned area).',
+    {fontSize: '13px',margin: '8px 8px 3px 8px'});
+
+  Map1.addLayer(ee.Image().byte().paint(availFires, 0).paint(availFires, 1, 1),
+      {palette:['red','black'], max: 1, opacity: 0.5});
+  Map1.centerObject(availFires);
+
+  var calloutBox = ui.Textbox();
+  var calloutPanel = ui.Panel({
+    widgets: [
+      ui.Label('On the map, click on the fire\'s buffer zone to print the name of the fire:',
+        {fontSize: '13px',
+          margin: '8px 8px 0 8px'}),
+      calloutBox
+    ],
+    style: {
+      width: '160px',
+      padding: '0',
+      position: 'bottom-right',
+    }
+  });
+
+  Map1.add(calloutPanel);
+
+  Map1.onClick(function(coords) {
+    var clickBuffer = ee.Geometry.Point([coords.lon,coords.lat]);
+    var filteredFires = availFires.filterBounds(clickBuffer);
+    var closestFire = ee.Algorithms.If(filteredFires.size().gt(0),
+      filteredFires.first().getString('Fire Name'),'');
+    calloutBox.setValue(closestFire.getInfo());
+  });
+
+  var availFiresPanel = ui.Panel({
+    widgets: [
+      availFiresLabel,
+      availFiresTable
+    ],
+    style: {
+      width: '345px',
+      padding: '0',
+      position: 'bottom-left',
+      maxHeight: '80%'
+    }
+  });
+
+  var availFiresWrapper = ui.Panel({
+    style: {
+      width: '345px',
+      padding: '0',
+      position: 'bottom-left',
+      maxHeight: '80%'
+    }
+  });
+
+  var hideIntroMode = true;
+  var hideShowIntroButton = ui.Button({
+    label: 'Hide Charts',
+    onClick: function() {
+      hideIntroMode = !hideIntroMode;
+      hideShowIntroButton.setLabel(hideIntroMode ? 'Hide Info': 'Show Info');
+      if (!hideIntroMode) {
+        availFiresWrapper.style().set({width: '85px', height: '45px'});
+      } else {
+        availFiresWrapper.style().set({width: '345px', height: 'auto'});
+      }
+    },
+      style: {padding: '0', margin: '8px 0 0 8px'}
+  });
+
+  Map1.add(availFiresWrapper.add(hideShowIntroButton).add(availFiresPanel));
+
+  ui.root.onResize(function(deviceInfo) {
+    if (deviceInfo.is_desktop & deviceInfo.width > 900) {
+      availFiresWrapper.style().set({width: '345px', height: 'auto'});
+      hideShowIntroButton.setLabel('Hide Info');
+      hideIntroMode = true;
+    } else {
+      availFiresWrapper.style().set({width: '85px', height: '45px'});
+      hideShowIntroButton.setLabel('Show Info');
+      hideIntroMode = false;
+    }
+  });
+
+}
+
+var displayFire = function(fireName) {
+
+  var year = fireYrSelect.getValue();
+  var fireParamsYrList = fireParamsList[year];
+
+  var Map1 = ui.Map().setOptions('TERRAIN'); Map1.style().set({cursor:'crosshair'});
+  var Map2 = ui.Map().setOptions('TERRAIN'); Map2.style().set({cursor:'crosshair'});
+
+  Map1.unlisten();
+
+  var controlPanel = ui.Panel({
+    layout: ui.Panel.Layout.flow('horizontal'),
+  });
+
+  var infoWrapper = ui.Panel(
+    {style: {width: '205px', maxHeight: '80%', position: 'bottom-right'}
+  });
+
+  var mapPanel = ui.Panel({
+    layout: ui.Panel.Layout.flow('horizontal'),
+  });
+
+  var map_panels = ui.SplitPanel({
+    firstPanel: ui.Panel({widgets: [Map2], style: {width: '0%'}}),
+    secondPanel: ui.Panel({widgets: [Map1], style: {Width: '100%'}}),
+  });
+
+  var mapGrid = ui.Panel([map_panels],
+    ui.Panel.Layout.Flow('horizontal'), {stretch: 'both'}
+  );
+
+  // Fire Parameters
+  var fireDict = fireParamsYrList[fireName];
+  var area_of_interest = fireDict.AOI;
+
+  var localStartTime = UTCtoLT(fireDict.start,timeZoneList[fireDict.state]).getInfo();
+
+  var smoothed_confidence = getFireConf(area_of_interest,fireDict,fireDict.end);
+  var affected_areas = getFirePerim(fireDict,area_of_interest,smoothed_confidence,0.9);
+  var affected_areas_smoothed_outline = getFirePerimImg(affected_areas,3);
+
+  var affected_areas75 = getFirePerim(fireDict,area_of_interest,smoothed_confidence,0.75);
+  var affected_areas99 = getFirePerim(fireDict,area_of_interest,smoothed_confidence,0.99);
+  var affected_areas_smoothed_outlineBounds =
+    getFirePerimImg(affected_areas99.merge(affected_areas75),1.5);
+
+  var fireAreaByHour = getFireProgression(fireDict,area_of_interest);
+
+  var title = ui.Label(fireName + ' Fire | ' + fireDict.stDate + ' | ' + fireDict.status,
+    {stretch: 'horizontal', textAlign: 'left', fontWeight: 'bold',
+      fontSize: '20px', color: 'red', margin: '0 8px 8px 15px'});
+
+  // Map layers
+  ui.root.add(title); ui.root.add(mapGrid);
+  ui.root.setLayout(ui.Panel.Layout.Flow('vertical'));
+
+  Map1.setControlVisibility({mapTypeControl: false, layerList: false});
+  Map1.addLayer(smoothed_confidence.selfMask(),
+    {opacity: 0.4, min: 0, max: 1, palette: fire_confidence_palette},
+      'Smoothed confidence');
+
+  Map1.addLayer(affected_areas_smoothed_outline,
+    {palette: 'black'},'Smoothed affected areas, 90%', true, 0.75);
+  Map1.addLayer(affected_areas_smoothed_outlineBounds,
+    {palette: '#D3D3D3'},'Smoothed affected areas, 75%-99%', true, 0.75);
+
+  Map2.setControlVisibility({layerList: false, mapTypeControl: false});
+
+  Map2.addLayer(landcover.selfMask(), {min: 1, max: 9, palette: lc_palette},
+    'NLCD Land Cover', true, 0.5);
+
+
+  var fireAreaSeverity = null;
+  if (fireDict.status == 'Final') {
+    var dynamicWorld = getDynamic(fireDict,area_of_interest);
+
+    Map2.addLayer(dynamicWorld, {min: 0, max: 0.8},
+      'Dynamic World Land Cover', false, 0.75);
+
+    var burnSeverity = getBurnSeverity(fireDict,area_of_interest,smoothed_confidence);
+    fireAreaSeverity = getFireAreaSeverity(fireDict,burnSeverity,area_of_interest);
+
+    Map2.addLayer(burnSeverity, {min: 1, max: 4, palette: burn_severity_palette},
+      'Burn severity', false, 0.75);
+  }
+
+  Map2.addLayer(affected_areas_smoothed_outline,
+    {palette: 'black'},'Smoothed affected areas', true, 0.75);
+
+  var legendDict = {
+    'NLCD Land Cover': getLegendDiscrete('Land Cover',lc_labels,lc_palette,
+      'Data: USGS National Land Cover Database (30-m)'),
+    'Dynamic World Land Cover': getLegendDiscrete('Land Cover',dynamic_labels,dynamic_palette,
+      'Data: Google/WRI Dynamic World v1 (10-m)'),
+    'Burn Severity': getLegendDiscrete('Burn Severity',burn_severity_labels,burn_severity_palette,
+      'Data: Sentinel-2A (10-m) surface reflectance'),
+  };
+
+  var layerNames = ['NLCD Land Cover','Dynamic World Land Cover', 'Burn Severity'];
+  if (fireDict.status == 'Active') {
+    layerNames = ['Land Cover'];
+  }
+
+  var layerDict = {
+    'NLCD Land Cover': [true,false,false],
+    'Dynamic World Land Cover': [false,true,false],
+    'Burn Severity': [false,false,true],
+  };
+
+  var legendParent = ui.Panel({style: {margin:'0', padding: '0'}});
+  var layerSelect = ui.Select({
+    items: layerNames,
+    value: 'NLCD Land Cover',
+    style: {stretch:'horizontal'}
+  });
+
+  var layerPanel = ui.Panel({
+    widgets: [layerSelect,legendParent],
+    style: {width: '150px',margin:'0',padding:'0 0 8px 0', position:'bottom-left'}
+  });
+
+  legendParent.add(legendDict['NLCD Land Cover']);
+
+  layerSelect.onChange(function(selected) {
+    legendParent.clear();
+    legendParent.add(legendDict[selected]);
+
+    for (var layer = 0; layer <= 2; layer++) {
+      var mapLayer = Map2.layers().get(layer);
+      mapLayer.setShown(layerDict[selected][layer]);
+    }
+  });
+
+  Map2.add(layerPanel);
+
+  var fireArea = [
+    getFireArea(fireDict,affected_areas),
+    getFireArea(fireDict,affected_areas99),
+    getFireArea(fireDict,affected_areas75)
+  ];
+
+  var infoPanel = getInfoPanel(Map1,fireDict,fireName,fireArea,fireAreaSeverity);
+
+  var hideMode = true;
+  var hideShowButton = ui.Button({
+    label: 'Hide Info Panel',
+    onClick: function() {
+      hideMode = !hideMode;
+      hideShowButton.setLabel(hideMode ? 'Hide Info Panel': 'Show Info Panel');
+      if (!hideMode) {
+        infoWrapper.style().set({width: '115px', height: '45px'});
+      } else {
+        infoWrapper.style().set({width: '205px', height: 'auto'});
+      }
+    },
+      style: {padding: '0', margin: '0'}
+  });
+
+  var MTBSwrapper = ui.Panel({style: {margin: '0 0 0 -8px', padding: '0'}});
+
+  var hideModeMTBS = true;
+  var hideShowButtonMTBS = ui.Button({
+    label: 'See Historical Fires',
+    onClick: function() {
+      hideModeMTBS = !hideModeMTBS;
+      hideShowButtonMTBS.setLabel(hideModeMTBS ? 'See Historical Fires': 'Hide Historical Fires');
+      var MTBSpanel = getMTBStable(area_of_interest);
+
+      if (!hideModeMTBS) {
+        MTBSwrapper.add(MTBSpanel);
+      } else {
+        MTBSwrapper.clear();
+      }
+    },
+      style: {padding: '0', margin: '0'}
+  });
+
+  infoPanel.add(hideShowButtonMTBS)
+    .add(ui.Label('Data: Monitoring Trends in Burn Severity (MTBS) from 1984-2019',
+      {fontSize:'12px', margin:'0', padding:'5px 12px 0 0', color:'#777'}))
+    .add(MTBSwrapper);
+
+  infoWrapper.add(hideShowButton).add(infoPanel);
+  Map1.add(infoWrapper);
+
+  var chartWrapper = ui.Panel({
+    widgets: [],
+    style: {position:'bottom-left', width:'400px', maxHeight: '90%'}
+  });
+
+  var chartPanel = ui.Panel({
+    widgets: [],
+    style: {margin: '8px -8px -8px -8px', width:'400px'}
+  });
+
+  var hideChartMode = true;
+  var hideShowChartButton = ui.Button({
+    label: 'Hide Charts',
+    onClick: function() {
+      hideChartMode = !hideChartMode;
+      hideShowChartButton.setLabel(hideChartMode ? 'Hide Charts': 'Show Charts');
+      if (!hideChartMode) {
+        chartWrapper.style().set({width: '97px', height: '45px'});
+      } else {
+        chartWrapper.style().set({width: '400px', height: 'auto'});
+      }
+    },
+      style: {padding: '0', margin: '0'}
+  });
+
+  var fireProgAnim = getFireProgImgAnim(area_of_interest,fireAreaByHour);
+  var fireProgressionChart = chartFireProgression(fireDict,fireAreaByHour,localStartTime);
+  var activeFireChart = chartActiveFires(fireDict,area_of_interest,localStartTime);
+  chartPanel.add(fireProgressionChart).add(fireProgAnim).add(activeFireChart);
+  chartWrapper.add(hideShowChartButton).add(chartPanel);
+
+  Map1.add(chartWrapper);
+
+  ui.root.onResize(function(deviceInfo) {
+    if (deviceInfo.is_desktop & deviceInfo.width > 900) {
+      chartWrapper.style().set({width: '400px', height: 'auto'});
+      hideShowChartButton.setLabel('Hide Charts');
+      hideChartMode = true;
+    } else {
+      chartWrapper.style().set({width: '97px', height: '45px'});
+      hideShowChartButton.setLabel('Show Charts');
+      hideChartMode = false;
+    }
+  });
+
+  ui.Map.Linker([Map1,Map2]);
+
+  Map1.centerObject(area_of_interest,fireDict.zoom);
+
+  ui.url.set('year',year);
+  ui.url.set('fire_name',fireName);
+};
+
+if (ui.url.get('fire_name') !== undefined) {
+  fireSelect.setValue(fireName);
+}

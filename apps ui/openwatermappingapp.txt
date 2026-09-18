@@ -1,0 +1,137 @@
+var AB = ee.FeatureCollection("users/Alberta_Sentinel_analysis_v20/grassland_input/SA"),
+    Pilot = ee.FeatureCollection("users/Alberta_Sentinel_analysis_v20/grassland_input/Index11"),
+    aci_binary = ee.Image("users/Alberta_Sentinel_analysis_v20/HTV_Pilot/Cultivation"),
+    amwi = ee.Image("users/Alberta_Sentinel_analysis_v20/Results_PGNR/AMWI"),
+    RF = ee.Image("users/Alberta_Sentinel_analysis_v20/Results_PGNR/Wetland_PGNR_RF_v4"),
+    openwater_pgnr = ee.Image("users/Alberta_Sentinel_analysis_v20/Results_PGNR/OpenWater_PGNR"),
+    openwater_pgnr_clip = ee.Image("users/Alberta_Sentinel_analysis_v20/Results_PGNR/OpenWater_PGNR_hr_clip"),
+    hr = ee.FeatureCollection("users/Alberta_Sentinel_analysis_v20/grassland_input/amwi_boundary_final"),
+    openwater_hr_ref = ee.Image("users/Alberta_Sentinel_analysis_v20/Results_PGNR/OpenWater_HR_ref");
+/*
+var dataset = ee.ImageCollection('AAFC/ACI');
+var crop2017 = dataset
+    .filter(ee.Filter.date('2017-01-01', '2017-12-31'))
+    .first();
+//Map.setCenter(-103.8881, 53.0371, 5);
+//Map.addLayer(crop2017);
+//var Apal = ['#08306b', '#006d2c', '#8c510a', '#b8e186', '#fdae61'];
+//var Apal =['#08306b', '#b8e186', '#fdae61'];
+//var Apal =['#0057e7', '#ffa700', '#a1a0a0'];
+*/
+
+var Apal =['#4285F4'];
+var Apal2 =['#DD4B39'];
+
+//var aci_ab = crop2017.clip(AB);
+//var pilot = crop2017.clip(Pilot);
+
+//Add layers to Map
+Map.setCenter(-112.049538,51.309721, 7);
+//Map.addLayer(aci_ab,{},'ACI2017 Parkland Grassland NR');
+//Map.addLayer(pilot,{},'ACI2017_Pilot');
+//Map.addLayer(hr,{},'High resolution area - AMWI');
+Map.addLayer(openwater_pgnr, {min:1, max:1, palette:Apal}, 'Openwater Prediction (PGNR)');
+//Map.addLayer(openwater_pgnr_clip, {min:1, max:1, palette:Apal}, 'Openwater Prediction (high res.)');
+//Map.addLayer(openwater_hr_ref, {min:1, max:1, palette:Apal2}, 'Openwater Prediction (HR ref.)');
+Map.addLayer(AB, {}, 'Parkland & Grassland NR')
+
+//--------------------------------------------------------------------------------------------------
+// Add a title and some explanatory text to a side panel.
+var header = ui.Label('Open-water Mapping: Southern Alberta', {fontSize: '36px', color: 'red'});
+var text = ui.Label(
+    'The results presented are based on the parkland and grassland natural region. The Random Forest supervised classification was performed with Sentinel 1 radar, Sentinel-2 optical, and LiDAR derived input variables.',
+    {fontSize: '12px'});
+
+var toolPanel = ui.Panel([header, text], 'flow', {width: '300px'});
+ui.root.widgets().add(toolPanel);
+
+
+var link = ui.Label(
+    'VVdiff, NDWIdiff, Sentinel-2 diff. layers (B4diff & B8diff), and SWI - saga wetness index LiDAR derived.',{fontSize: '12px'});
+
+
+var linkPanel = ui.Panel(
+    [ui.Label('Input variables used for RF model', {fontWeight: 'bold'}), link]);
+toolPanel.add(linkPanel);
+
+
+var link = ui.Label(
+    'Overall Accuracy (%) = 90.4, Overall Kappa=0.74, F-Scores(%): Open Water=0.8. Upland=0.94.',{fontSize: '12px'});
+
+
+var linkPanel = ui.Panel(
+    [ui.Label('Accuracy assessment results (summary)', {fontWeight: 'bold'}), link]);
+toolPanel.add(linkPanel);
+
+
+//----------------------------------------------------------------------------------------------------
+//Add legend of Prediction to Map Layout
+// set position of panel
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+// Create legend title
+var legendTitle = ui.Label({
+  value: 'Legend',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '18px',
+    margin: '0 0 4px 0',
+    padding: '0'
+    }
+});
+
+// Add the title to the panel
+legend.add(legendTitle);
+
+// Creates and styles 1 row of the legend.
+var makeRow = function(color, name) {
+
+      // Create the label that is actually the colored box.
+      var colorBox = ui.Label({
+        style: {
+          backgroundColor: '#' + color,
+          // Use padding to give the box height and width.
+          padding: '8px',
+          margin: '0 0 4px 0'
+        }
+      });
+
+      // Create the label filled with the description text.
+      var description = ui.Label({
+        value: name,
+        style: {margin: '0 0 4px 6px'}
+      });
+
+      // return the panel
+      return ui.Panel({
+        widgets: [colorBox, description],
+        layout: ui.Panel.Layout.Flow('horizontal')
+      });
+};
+
+
+//  Palette with the colors
+//var palette =['FF0000', '22ff00', '1500ff'];
+//var palette =['0057e7', 'ffa700', 'a1a0a0','AADAFF'];
+//var palette =['0057e7', 'ffa700', 'a1a0a0'];
+
+
+//var palette =['4285F4', 'DD4B39'];
+var palette =['4285F4', 'D3D3D3'];
+
+// name of the legend
+//var names = ['Openwater Prediction','Openwater (HR ref.)'];
+var names = ['Openwater Prediction', 'Parkland & Grassland NR boundary'];
+
+// Add color and and names
+for (var i = 0; i < 2; i++) {
+  legend.add(makeRow(palette[i], names[i]));
+  }
+
+// add legend to map (alternatively you can also print the legend to the console)
+Map.add(legend);

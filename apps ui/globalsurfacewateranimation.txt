@@ -1,0 +1,712 @@
+var geometry = ui.import && ui.import("geometry", "geometry", {
+      "geometries": [
+        {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                -74.327,
+                -9.327
+              ],
+              [
+                -74.327,
+                -10.201
+              ],
+              [
+                -73.931,
+                -10.201
+              ],
+              [
+                -73.931,
+                -9.327
+              ]
+            ]
+          ],
+          "evenOdd": true
+        }
+      ],
+      "displayProperties": [],
+      "properties": {},
+      "color": "#000000",
+      "mode": "Geometry",
+      "shown": true,
+      "locked": false
+    }) || /* color: #000000 */ee.Geometry.Polygon(
+        [[[-74.327, -9.327],
+          [-74.327, -10.201],
+          [-73.931, -10.201],
+          [-73.931, -9.327]]]);
+
+Map.setOptions('Dark', {Dark: darkMap()});
+Map.setControlVisibility({all: false});
+
+
+var height = 600;
+ui.root.onResize(function(dev) {
+  height = (dev.height-250 > 600 || dev.height === 0) ? 600 : dev.height-250;
+  height = height < 1 ? 100 : height;
+});
+
+
+var initCenter = ee.Geometry.Point(-73.6028, -9.5861).toGeoJSONString();
+var centerUrl = ui.url.get('center', initCenter);
+ui.url.set('center', centerUrl);
+var center = ee.Geometry(JSON.parse(centerUrl));
+
+var zoomUrl = ui.url.get('zoom', '9');
+ui.url.set('zoom', zoomUrl);
+var zoom = parseInt(zoomUrl);
+
+var initAoi = ee.Geometry.Rectangle(-74.327, -10.201, -73.931, -9.327).toGeoJSONString();
+var aoiUrl = ui.url.get('aoi', initAoi);
+ui.url.set('aoi', aoiUrl);
+var aoi = ee.Geometry(JSON.parse(aoiUrl));
+
+var renderUrl = ui.url.get('render', 'Fading history');
+ui.url.set('render', renderUrl);
+var render = renderUrl;
+
+var fpsUrl = ui.url.get('fps', '10');
+ui.url.set('fps', fpsUrl);
+var fps = parseInt(fpsUrl);
+
+var fadeUrl = ui.url.get('fade', '0.1');
+ui.url.set('fade', fadeUrl);
+var fade = parseFloat(fadeUrl);
+
+Map.centerObject(center, zoom);
+Map.onChangeBounds(function(e) {
+  ui.url.set('center', ee.Geometry.Point(e.lon, e.lat).toGeoJSONString());
+  ui.url.set('zoom', e.zoom);
+});
+
+var drawingTools = Map.drawingTools();
+drawingTools.setShown(false);
+
+while (drawingTools.layers().length() > 0) {
+  var layer = drawingTools.layers().get(0);
+  drawingTools.layers().remove(layer);
+}
+
+drawingTools.addLayer([aoi], null, '000');
+
+var col = ee.ImageCollection("JRC/GSW1_1/YearlyHistory");
+
+col = col.map(function(img) {
+  var year = img.date().get('year');
+  return img.gte(2).multiply(year).set('year', year).toInt();
+});
+
+var dem = ee.Image('JAXA/ALOS/AW3D30/V2_2').select('AVE_DSM');
+var demMask = dem.gt(0);
+var hillshade = ee.Terrain.hillshade(dem.multiply(15))
+  .updateMask(demMask)
+  .visualize({min:0, max:800, opacity:0.50});
+
+var visLayer = {
+  min: 1984,
+  max: 2018,
+  palette: ['F9FB0E', 'F9BD3F', 'A3BD6A', '33B7A0', '089BCE', '056EDE']
+};
+
+var bgColor = '000000';
+var riverColor = '056EDE';
+var yearSeq = ee.List.sequence(1984, 2018);
+var bgImg = ee.Image(1).visualize({palette: bgColor});
+
+var imgLayer = hillshade.blend(col.max().visualize(visLayer));
+Map.addLayer(imgLayer);
+
+// ###############################
+
+function forwardBack(col) {
+  return col.merge(col.sort('year', false));
+}
+
+// ### Ghost of stream channel path
+function fadeAnimation() {
+  var fadeFilter = ee.Image(1).visualize({palette: bgColor,
+    opacity: ((fadeSlider.getValue() > 0.98) ? 0.98 : fadeSlider.getValue())});
+
+  var fadeFilterCol = col.map(function(img) {
+    var imgVis = img.selfMask().visualize({palette: riverColor});
+    return imgVis.blend(fadeFilter).set('year', img.get('year'));
+  });
+
+  var fadeCol = ee.ImageCollection.fromImages(yearSeq.map(function(year) {
+    var fadeComp =
+        fadeFilterCol.filter(ee.Filter.lte('year', year)).sort('year').mosaic();
+    var thisYearImg = col.filter(ee.Filter.eq('year', year)).first().selfMask().visualize({
+      palette: riverColor
+    });
+    return bgImg.blend(fadeComp).blend(thisYearImg).set('year', year);
+  }));
+  return fadeCol;
+}
+
+function cumulativeAnimation() {
+  var cumulativeFilterCol = col.map(function(img) {
+    return img.selfMask().visualize(visLayer).set('year', img.get('year'));
+  });
+
+  var cumulativeCol = ee.ImageCollection.fromImages(yearSeq.map(function(year) {
+    var cumulativeComp = cumulativeFilterCol.filter(ee.Filter.lte('year', year))
+                             .sort('year')
+                             .mosaic();
+    return bgImg.blend(cumulativeComp).set('year', year);
+  }));
+  return cumulativeCol;
+}
+
+
+// ###############################
+// ### Control panel UI
+
+var drawLabel = ui.Label({value: 'Global Surface Water Animation', style: {
+  color: 'FFF', fontSize: '16px', backgroundColor: 'rgba(0,0,0,0.0)',
+  margin: '3px 4px 2px 4px'}
+});
+var drawButton = ui.Button({label: 'Draw a new region', style: {stretch: 'horizontal', margin: '1px'}});
+var clearButton = ui.Button({label: 'Clear animation', style: {stretch: 'horizontal', margin: '1px'}});
+var drawPanel = ui.Panel({
+  widgets: [drawButton, clearButton],
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style: {stretch: 'horizontal', position: 'bottom-left', padding: '4px',
+    backgroundColor: 'rgba(0,0,0,0.0)'
+  }});
+
+var selectLabel = ui.Label({value: 'Animation type:', style: {color: 'FFF', fontSize: '11px',
+  fontWeight: '500', backgroundColor: 'rgba(0,0,0,0.0)'}});
+var selectButton = ui.Select({items: ['Fading history', 'Cumulative history'],
+  value: render, style: {stretch: 'horizontal', margin: '1px'}});
+var selectPanel = ui.Panel({
+  widgets: [selectLabel, selectButton],
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style: {stretch: 'horizontal', position: 'bottom-left', padding: '4px',
+    backgroundColor: 'rgba(0,0,0,0.0)'
+  }});
+
+var fpsLabel = ui.Label({value: 'FPS:', style: {color: 'FFF', fontSize: '11px',
+  fontWeight: '500', backgroundColor: 'rgba(0,0,0,0.0)'}});
+var fpsSlider = ui.Slider({
+  min: 1,
+  max: 50,
+  value: fps,
+  step: 1,
+  onChange: renderAnimations,
+  style: {stretch: 'horizontal', color: 'FFF', fontSize: '11px', fontWeight: '500',
+    backgroundColor: 'rgba(0,0,0,0.0)'}});
+var fpsPanel = ui.Panel({widgets: [fpsLabel, fpsSlider],
+  layout: ui.Panel.Layout.Flow('horizontal'),
+  style: {margin: '1px 5px 5px 5px', backgroundColor: 'rgba(0,0,0,0.0)'}
+});
+
+var fadeLabel = ui.Label({value: 'Fade rate:',
+  style: {color: 'FFF', fontSize: '11px', fontWeight: '500', backgroundColor: 'rgba(0,0,0,0.0)',
+    margin: '4px 8px 8px 8px'}});
+var fadeSlider = ui.Slider({
+  min: 0.0,
+  max: 1.0,
+  value: fade,
+  step: 0.02,
+  disabled: render == 'Fading history' ? false : true,
+  onChange: renderAnimations,
+  style: {stretch: 'horizontal', color: 'FFF', fontSize: '11px', fontWeight: '500',
+    backgroundColor: 'rgba(0,0,0,0.0)', margin: '4px 8px 8px 8px'}});
+var fadePanel = ui.Panel({widgets: [fadeLabel, fadeSlider],
+  layout: ui.Panel.Layout.Flow('horizontal'),
+  style: {margin: '1px 5px 5px 5px', backgroundColor: 'rgba(0,0,0,0.0)'}
+});
+
+var controlPanel = ui.Panel({
+  widgets: [drawLabel, drawPanel, selectPanel, fpsPanel, fadePanel, legend()],
+  style: {stretch: 'horizontal', position: 'top-left', padding: '4px',
+    backgroundColor: 'rgba(0,0,0,0.5)', width: '306px'
+  }});
+Map.add(controlPanel);
+
+
+// ### Control panel call back functions
+function clearMap() {
+  if(dirty) {
+    Map.remove(gifPanel);
+    clearGeometry();
+    dirty = false;
+  }
+}
+clearButton.onClick(clearMap);
+
+function clearGeometry(){
+  var layers = drawingTools.layers();
+  layers.get(0).geometries().remove(layers.get(0).geometries().get(0));
+}
+
+function drawRectangle(){
+  if(dirty) Map.remove(gifPanel);
+  dirty = false;
+  clearGeometry();
+  drawingTools.setShape('rectangle');
+  drawingTools.draw();
+}
+drawButton.onClick(drawRectangle);
+
+function switchAni() {
+  render = selectButton.getValue();
+  ui.url.set('render', render);
+  if(render == 'Fading history') {
+    fadeSlider.setDisabled(false);
+  } else {
+    fadeSlider.setDisabled(true);
+  }
+  if(dirty) renderAnimations();
+}
+selectButton.onChange(switchAni);
+
+function makeColorBarParams(palette) {
+  return {
+    bbox: [0, 0, 1, 0.1],
+    dimensions: '100x10',
+    format: 'png',
+    min: 0,
+    max: 1,
+    palette: palette,
+  };
+}
+
+function legend() {
+  var colorBar = ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select(0),
+    params: makeColorBarParams(visLayer.palette),
+    style: {stretch: 'horizontal', margin: '0px 8px', maxHeight: '18px'},
+  });
+
+  var legendLabels = ui.Panel({
+    widgets: [
+      ui.Label(visLayer.min, {margin: '4px 8px', fontSize: '11px', fontWeight: '100',
+        backgroundColor: 'rgba(0, 0, 0, 0.0)', color: 'FFF'}),
+      ui.Label(
+          ((visLayer.max - visLayer.min) / 2 + visLayer.min),
+          {margin: '4px 8px', textAlign: 'center', stretch: 'horizontal', fontSize: '11px',
+            fontWeight: '100', backgroundColor: 'rgba(0, 0, 0, 0.0)', color: 'FFF'}),
+      ui.Label(visLayer.max, {margin: '4px 8px', fontSize: '11px', fontWeight: '100',
+        backgroundColor: 'rgba(0, 0, 0, 0.0)', color: 'FFF'})
+    ],
+    layout: ui.Panel.Layout.flow('horizontal'),
+    style: {backgroundColor: 'rgba(0, 0, 0, 0.0)'}
+  });
+
+  var legendTitle = ui.Label({
+    value: 'Most recent year of water occurance' ,
+    style: {margin: '4px 8px', fontSize: '11px', fontWeight: '100',
+        backgroundColor: 'rgba(0, 0, 0, 0.0)', color: 'FFF'}
+  });
+
+  return ui.Panel({widgets: [legendTitle, colorBar, legendLabels], style: {backgroundColor: 'rgba(0, 0, 0, 0.0)'}});
+}
+
+
+// Function to plot chart on drawing events.
+var animation;
+var gifPanel;
+var dirty = false;
+function renderAnimations() {
+  if(dirty) Map.remove(gifPanel);
+
+  aoi = drawingTools.layers().get(0).getEeObject();
+
+  ui.url.set('aoi', aoi.toGeoJSONString());
+  ui.url.set('fps', fpsSlider.getValue());
+  ui.url.set('fade', fadeSlider.getValue());
+
+  drawingTools.setShape(null);
+
+  var videoArgs = {
+    dimensions: height,
+    region: aoi,
+    framesPerSecond: fpsSlider.getValue(),
+    crs: 'EPSG:3857'
+  };
+
+  if(render == 'Fading history') {
+    animation = ui.Thumbnail({image: forwardBack(fadeAnimation()), params: videoArgs,
+      style: {margin: '3px'}});
+  } else {
+    animation = ui.Thumbnail({image: forwardBack(cumulativeAnimation()), params: videoArgs,
+      style: {margin: '3px'}});
+  }
+
+  gifPanel = ui.Panel({style: {position: 'bottom-right', padding: '1px',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)'}});
+  gifPanel.add(animation);
+  Map.add(gifPanel);
+  dirty = true;
+}
+drawingTools.onEdit(ui.util.debounce(renderAnimations, 500));
+drawingTools.onDraw(ui.util.debounce(renderAnimations, 500));
+
+// Initialize animation.
+renderAnimations();
+
+
+// ###############################
+// ### Notes panel
+var notesShow = false;
+function notesButtonHandler() {
+  if(notesShow){
+    notesShow = false;
+    notesPanel.style().set('shown', false);
+    notesPanel.style().set('width', '83px');
+    notesButton.setLabel('See notes');
+  } else {
+    notesShow = true;
+    notesPanel.style().set('shown', true);
+    notesPanel.style().set('width', '290px');
+    notesButton.setLabel('Hide notes');
+  }
+}
+
+var noteStyle = {backgroundColor: 'rgba(0,0,0,0.0)', fontSize: '11px', fontWeight: '500', margin: '8px 8px 1px 8px'};
+var noteStyle2 = {backgroundColor: 'rgba(0,0,0,0.0)', fontSize: '11px', fontWeight: '500'};
+
+var notesButton = ui.Button({label: 'See notes', onClick: notesButtonHandler, style: {margin: '0px'}});
+var notesPanel = ui.Panel({
+  widgets: [
+    ui.Label({value: 'This app animates 35 years of surface water changes at an annual time step.', style: noteStyle}),
+    ui.Label({value: '• Use the buttons and sliders to customize the animation.', style: noteStyle}),
+    ui.Label({value: '• Download the animation by right clicking on it and selecting a save option.', style: noteStyle}),
+    ui.Label({value: '• URL parameters are used to save the state of the app. Copy the entire URL and send to others to share what you are seeing.', style: noteStyle}),
+    ui.Label({value: '• Learn about JRC Global Surface Water dataset.', style: noteStyle, targetUrl: 'http://global-surface-water.appspot.com/'}),
+    ui.Label({value: '• See data description in the Earth Engine Data Catalog.', style: {backgroundColor: 'rgba(0,0,0,0.0)', fontSize: '11px', fontWeight: '500', margin: '8px 8px 8px 8px'}, targetUrl: 'https://developers.google.com/earth-engine/datasets/catalog/JRC_GSW1_1_YearlyHistory'})
+
+  ],
+  style: {shown: false, backgroundColor: 'rgba(255,255,255,0.8)', fontSize: '11px', fontWeight: '500'}
+});
+
+var holder = ui.Panel({widgets: [notesButton, notesPanel],
+  style: {position: 'bottom-left', padding: '8px',
+    backgroundColor: 'rgba(0,0,0,0.5)'}});
+Map.add(holder);
+
+
+// ###############################
+// ### Dark map
+
+function darkMap() {
+  return [
+    {
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#191919"
+        }
+      ]
+    },
+    {
+      "elementType": "labels.icon",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#757575"
+        }
+      ]
+    },
+    {
+      "elementType": "labels.text.stroke",
+      "stylers": [
+        {
+          "color": "#212121"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative",
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#757575"
+        },
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative.country",
+      "elementType": "geometry.stroke",
+      "stylers": [
+        {
+          "visibility": "on"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative.country",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#9e9e9e"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative.land_parcel",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative.locality",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#bdbdbd"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative.neighborhood",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "administrative.province",
+      "elementType": "geometry.stroke",
+      "stylers": [
+        {
+          "visibility": "on"
+        }
+      ]
+    },
+    {
+      "featureType": "landscape",
+      "elementType": "geometry.fill",
+      "stylers": [
+        {
+          "visibility": "on"
+        }
+      ]
+    },
+    {
+      "featureType": "landscape.natural.terrain",
+      "elementType": "labels.text.stroke",
+      "stylers": [
+        {
+          "visibility": "on"
+        }
+      ]
+    },
+    {
+      "featureType": "poi",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "poi",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#757575"
+        }
+      ]
+    },
+    {
+      "featureType": "poi.park",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "poi.park",
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#181818"
+        }
+      ]
+    },
+    {
+      "featureType": "poi.park",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#616161"
+        }
+      ]
+    },
+    {
+      "featureType": "poi.park",
+      "elementType": "labels.text.stroke",
+      "stylers": [
+        {
+          "color": "#1b1b1b"
+        }
+      ]
+    },
+    {
+      "featureType": "road",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "road",
+      "elementType": "geometry.fill",
+      "stylers": [
+        {
+          "color": "#2c2c2c"
+        }
+      ]
+    },
+    {
+      "featureType": "road",
+      "elementType": "labels",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "road",
+      "elementType": "labels.icon",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "road",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#8a8a8a"
+        }
+      ]
+    },
+    {
+      "featureType": "road.arterial",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "road.arterial",
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#373737"
+        }
+      ]
+    },
+    {
+      "featureType": "road.highway",
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#3c3c3c"
+        }
+      ]
+    },
+    {
+      "featureType": "road.highway",
+      "elementType": "labels",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "road.highway.controlled_access",
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#4e4e4e"
+        }
+      ]
+    },
+    {
+      "featureType": "road.local",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "road.local",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#616161"
+        }
+      ]
+    },
+    {
+      "featureType": "transit",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "transit",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#757575"
+        }
+      ]
+    },
+    {
+      "featureType": "water",
+      "elementType": "geometry",
+      "stylers": [
+        {
+          "color": "#000000"
+        }
+      ]
+    },
+    {
+      "featureType": "water",
+      "elementType": "labels.text",
+      "stylers": [
+        {
+          "visibility": "off"
+        }
+      ]
+    },
+    {
+      "featureType": "water",
+      "elementType": "labels.text.fill",
+      "stylers": [
+        {
+          "color": "#3d3d3d"
+        }
+      ]
+    }
+  ];
+}
